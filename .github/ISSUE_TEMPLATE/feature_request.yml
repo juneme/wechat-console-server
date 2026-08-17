@@ -1,0 +1,36 @@
+name: Feature request
+description: 提议面向真实公众号工作流的改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述当前工作流、使用者和阻碍，不要只写功能名称。
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 当前替代方案
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 控制台界面
+        - 微信 API
+        - 图片或素材
+        - 草稿工作流
+        - Codex Skill
+        - 部署与运维
+    validations:
+      required: true

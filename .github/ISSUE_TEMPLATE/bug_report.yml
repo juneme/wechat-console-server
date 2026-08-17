@@ -1,0 +1,66 @@
+name: Bug report
+description: 报告可复现的控制台、API 或 Skill 问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请先删除日志、截图和命令输出中的 AppSecret、API Key、Cookie 及 Authorization 请求头。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 控制台版本或发布包文件名
+      placeholder: 3.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题范围
+      options:
+        - 控制台界面
+        - 微信 API
+        - 图片上传
+        - 草稿写入
+        - Codex Skill
+        - 部署或升级
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 登录控制台
+        2. 打开……
+        3. 点击……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断与日志
+      description: 可粘贴“API 接口”页面的诊断结果和已脱敏日志，禁止提交任何密钥。
+      render: shell
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      placeholder: Ubuntu 24.04 / Docker 27 / Chrome 128
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: 敏感信息确认
+      options:
+        - label: 我已删除 AppSecret、API Key、Cookie、Authorization 请求头和公网管理密码。
+          required: true

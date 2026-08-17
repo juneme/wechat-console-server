@@ -1,0 +1,13 @@
+services:
+  uploader:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "0.0.0.0:8787:8000"
+    volumes:
+      - uploader-data:/data
+
+volumes:
+  uploader-data:

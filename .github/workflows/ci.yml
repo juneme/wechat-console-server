@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint Python
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Check browser JavaScript syntax
+        run: node --check app/static/app.js
+
+      - name: Check shell script syntax
+        run: bash -n install.sh show-client-config.sh rotate-api-keys.sh
+
+      - name: Build server release archive
+        run: python scripts/build_release.py --output artifacts/wechat-console-server-ci.zip
+
+      - name: Verify server release archive
+        run: python scripts/build_release.py --verify-only artifacts/wechat-console-server-ci.zip
+
+      - name: Upload verified server release
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-console-server-release
+          path: artifacts/wechat-console-server-ci.zip
+          if-no-files-found: error

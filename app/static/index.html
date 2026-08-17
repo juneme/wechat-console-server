@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>微信公众号控制台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/app.css?v=4">
+  </head>
+  <body>
+    <section id="authView" class="auth-view" aria-labelledby="loginTitle">
+      <div class="auth-visual" aria-hidden="true">
+        <div class="auth-brand-wrap">
+          <div class="auth-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <p class="auth-slogan">创意予你无限，codex重塑未来</p>
+        </div>
+        <div class="contact-sheet">
+          <span class="visual-tile tile-one"></span>
+          <span class="visual-tile tile-two"></span>
+          <span class="visual-tile tile-three"></span>
+          <span class="visual-tile tile-four"></span>
+          <span class="visual-tile tile-five"></span>
+          <span class="visual-tile tile-six"></span>
+        </div>
+        <p class="visual-caption">WECHAT OPERATIONS CONSOLE <span>2026</span></p>
+      </div>
+      <div class="auth-panel">
+        <form id="loginForm" class="login-form">
+          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <p class="kicker">ADMIN ACCESS</p>
+          <h1 id="loginTitle">登录控制台</h1>
+          <label class="field-label" for="loginUsername">管理员账号</label>
+          <input id="loginUsername" class="text-input" name="username" type="text" autocomplete="username" maxlength="128" required autofocus>
+          <label class="field-label" for="loginPassword">密码</label>
+          <input id="loginPassword" class="text-input" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+          <p id="loginError" class="form-error" role="alert" aria-live="polite"></p>
+          <button id="loginSubmit" class="button primary wide" type="submit">登录</button>
+        </form>
+      </div>
+    </section>
+
+    <div id="appShell" class="app-shell" hidden>
+      <aside class="sidebar">
+        <div class="sidebar-brand"><span class="brand-mark">微</span><div><strong>公众号控制台</strong><small>WECHAT OPS</small></div></div>
+        <div class="account-chip"><span id="sidebarAccountMark" class="account-mark">未</span><div><strong id="sidebarAccountName">未配置公众号</strong><small id="sidebarAccountId">等待配置</small></div></div>
+        <nav class="sidebar-nav" aria-label="控制台导航">
+          <button class="nav-item active" type="button" data-view="overview"><span>总览</span><small>01</small></button>
+          <button class="nav-item" type="button" data-view="account"><span>公众号设置</span><small>02</small></button>
+          <button class="nav-item" type="button" data-view="assets"><span>素材库</span><small>03</small></button>
+          <button class="nav-item" type="button" data-view="drafts"><span>草稿箱</span><small>04</small></button>
+          <button class="nav-item" type="button" data-view="api"><span>API 接入</span><small>05</small></button>
+        </nav>
+        <div class="sidebar-footer"><span id="currentUsername"></span><button id="logoutButton" class="text-button" type="button">退出</button></div>
+      </aside>
+
+      <div class="workspace">
+        <header class="workspace-header">
+          <div><p class="kicker" id="viewKicker">CONTROL CENTER</p><h1 id="viewTitle">运行总览</h1></div>
+          <div class="header-actions"><span id="connectionState" class="status-badge pending">检查中</span><button id="testConnection" class="button secondary" type="button">测试连接</button></div>
+        </header>
+
+        <main>
+          <section class="view active" data-view-panel="overview">
+            <div class="metric-grid">
+              <article class="metric"><small>微信连接</small><strong id="metricConnection">检查中</strong><span id="metricAccount">未配置账号</span></article>
+              <article class="metric"><small>微信素材</small><strong id="metricAssets">0</strong><span>已登记图片</span></article>
+              <article class="metric"><small>草稿记录</small><strong id="metricDrafts">0</strong><span id="metricDraftFailures">无失败任务</span></article>
+              <article class="metric"><small>临时图片</small><strong id="metricTemporary">0</strong><span>当前有效</span></article>
+            </div>
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">STATUS</p><h2>接口状态</h2></div><button class="button secondary goto-view" type="button" data-target="api">查看 API</button></div>
+              <div id="overviewApis" class="capability-grid"></div>
+            </section>
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">RECENT</p><h2>最近草稿</h2></div><button class="button secondary goto-view" type="button" data-target="drafts">全部记录</button></div>
+              <div id="recentDrafts" class="compact-list"></div>
+            </section>
+          </section>
+
+          <section class="view" data-view-panel="account">
+            <section class="content-section account-layout">
+              <div class="section-heading"><div><p class="section-index">ACCOUNT</p><h2>公众号凭据</h2></div><span id="accountSource" class="source-label"></span></div>
+              <form id="accountForm" class="settings-form">
+                <div class="form-grid">
+                  <label><span>公众号名称</span><input id="accountName" class="text-input" type="text" maxlength="80" required></label>
+                  <label><span>账号类型</span><select id="accountType" class="text-input"><option value="subscription">订阅号</option><option value="service">服务号</option></select></label>
+                  <label><span>AppID</span><input id="accountAppId" class="text-input mono" type="text" maxlength="64" required autocomplete="off"></label>
+                  <label><span>AppSecret</span><input id="accountSecret" class="text-input mono" type="password" maxlength="256" autocomplete="new-password" placeholder="留空则保持不变"></label>
+                </div>
+                <div class="settings-footer"><p id="accountMeta"></p><div><button id="accountTest" class="button secondary" type="button">测试凭据</button><button id="accountSave" class="button primary" type="submit">保存配置</button></div></div>
+              </form>
+            </section>
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">CHECKLIST</p><h2>接入状态</h2></div></div>
+              <div class="check-list"><div><span>01</span><strong>服务器出口 IP 白名单</strong><small>微信公众平台配置</small></div><div><span>02</span><strong>素材管理接口权限</strong><small>公众号接口权限</small></div><div><span>03</span><strong>草稿箱接口权限</strong><small>公众号接口权限</small></div></div>
+            </section>
+          </section>
+
+          <section class="view" data-view-panel="assets">
+            <section class="content-section">
+              <div class="section-heading stack-mobile"><div><p class="section-index">UPLOAD</p><h2>上传素材</h2></div><div class="segmented" role="radiogroup" aria-label="上传模式"><label><input type="radio" name="mode" value="material" checked><span>永久素材</span></label><label><input type="radio" name="mode" value="article"><span>正文图片</span></label><label><input type="radio" name="mode" value="both"><span>两种位置</span></label><label><input type="radio" name="mode" value="temporary"><span>临时托管</span></label></div></div>
+              <input id="fileInput" type="file" accept="image/jpeg,image/png,image/gif,image/bmp" multiple hidden>
+              <button id="dropZone" class="drop-zone" type="button"><span class="drop-mark">+</span><strong>选择或拖入图片</strong><small>JPG / PNG / GIF / BMP</small></button>
+              <div class="queue-toolbar"><p id="queueSummary">尚未选择图片</p><button id="clearQueue" class="button secondary" type="button" disabled>清空</button><button id="startUpload" class="button primary" type="button" disabled>开始上传</button></div>
+              <div id="queue" class="queue" aria-live="polite"></div>
+            </section>
+            <section class="content-section">
+              <div class="section-heading stack-mobile"><div><p class="section-index">LIBRARY</p><h2>素材记录 <span id="assetCount" class="muted-count"></span></h2></div><div class="header-actions"><button id="copyUrls" class="button secondary" type="button" disabled>复制 URL</button><button id="copyJson" class="button secondary" type="button" disabled>复制 JSON</button><button id="deleteSelected" class="button danger-outline" type="button" disabled>删除选中</button></div></div>
+              <div id="assetTable" class="data-table"></div>
+            </section>
+          </section>
+
+          <section class="view" data-view-panel="drafts">
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">DRAFTS</p><h2>草稿任务 <span id="draftCount" class="muted-count"></span></h2></div><button id="refreshDrafts" class="button secondary" type="button">刷新</button></div>
+              <div id="draftTable" class="data-table"></div>
+            </section>
+          </section>
+
+          <section class="view" data-view-panel="api">
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">ACCESS</p><h2>AI 接口</h2></div></div>
+              <div id="apiEndpoints" class="endpoint-list"></div>
+            </section>
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">DIAGNOSTICS</p><h2>运行诊断</h2></div><button id="runDiagnostics" class="button secondary" type="button">开始诊断</button></div>
+              <div id="diagnosticResults" class="capability-grid"><p class="empty-state">尚未运行诊断</p></div>
+            </section>
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">SECURITY</p><h2>服务端边界</h2></div></div>
+              <div class="security-grid"><div><strong>AppSecret</strong><span>仅服务端加密保存</span></div><div><strong>Access Token</strong><span>自动缓存与刷新</span></div><div><strong>API Key</strong><span>图片与发布权限隔离</span></div></div>
+            </section>
+          </section>
+        </main>
+      </div>
+
+      <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><h3 id="confirmTitle">确认操作</h3><p id="confirmMessage"></p><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirmAction" class="button danger" value="confirm">确认</button></div></form></dialog>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js?v=5" defer></script>
+  </body>
+</html>

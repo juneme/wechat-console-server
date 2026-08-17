@@ -1,0 +1,11 @@
+.env
+.qa/
+.venv/
+artifacts/
+data/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.zip
+wechat-article-designer-1.0.2/
