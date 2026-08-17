@@ -87,7 +87,8 @@ echo "等待健康检查..."
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
     echo "部署成功：请访问 http://服务器IP:8787"
-    echo "查看 Skill 客户端配置状态：bash show-client-config.sh --url http://服务器IP:8787"
+    echo "Skill 客户端配置：登录控制台后打开『API 接入』页面即可查看和复制。"
+    echo "命令行备用：bash show-client-config.sh --url http://服务器IP:8787"
     docker compose ps
     exit 0
   fi

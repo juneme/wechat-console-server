@@ -17,12 +17,16 @@ bash install.sh
 
 ### 2. 获取 Skill 客户端配置
 
+登录控制台，打开“API 接入 → Skill 客户端配置”，点击“显示配置”即可查看并复制三个客户端变量。API Key 默认隐藏，配置响应不会被浏览器缓存。
+
+命令行方式保留作为服务器维护备用：
+
 ```bash
 bash show-client-config.sh --url http://服务器IP:8787
 bash show-client-config.sh --url http://服务器IP:8787 --show-secrets
 ```
 
-第二条命令需要人工确认，随后输出 `WECHAT_CONSOLE_URL`、`WECHAT_IMAGE_API_KEY` 和 `WECHAT_PUBLISH_API_KEY`。不要把输出提交到 Git、Issue、截图或聊天记录。
+第二条命令需要人工确认，随后输出 `WECHAT_CONSOLE_URL`、`WECHAT_IMAGE_API_KEY` 和 `WECHAT_PUBLISH_API_KEY`。不要把面板或命令输出提交到 Git、Issue、截图或聊天记录。
 
 ### 3. 安装 Skill
 

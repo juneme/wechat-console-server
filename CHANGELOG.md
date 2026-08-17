@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add an admin-only Skill client configuration panel with masked keys, one-click copying, and no-store responses.
+
 ## 3.1.0 - 2026-08-17
 
 - Connect the article designer Skill to the image and draft APIs.

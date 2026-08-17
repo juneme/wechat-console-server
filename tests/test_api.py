@@ -383,3 +383,49 @@ def test_diagnostics_reports_readiness_without_secrets(
         assert "secret-test" not in serialized
 
     get_settings.cache_clear()
+
+
+def test_skill_client_config_requires_admin_and_disables_caching(
+    tmp_path: Path, monkeypatch
+) -> None:
+    image_key = "image-api-key-at-least-24-characters"
+    publish_key = "publish-api-key-at-least-24-characters"
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
+    monkeypatch.setenv("AI_API_KEY", image_key)
+    monkeypatch.setenv("PUBLISH_API_KEY", publish_key)
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://console.example.test")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
+    monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
+    get_settings.cache_clear()
+    headers = {"X-Requested-With": "WechatUploader"}
+
+    with TestClient(app) as client:
+        unauthorized = client.post("/api/skill-client-config", headers=headers)
+        assert unauthorized.status_code == 401
+
+        login = client.post(
+            "/api/auth/login",
+            headers=headers,
+            json={"username": "admin", "password": "strong-password"},
+        )
+        assert login.status_code == 200
+        assert client.post("/api/skill-client-config").status_code == 403
+
+        response = client.post("/api/skill-client-config", headers=headers)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store, private"
+        assert response.headers["pragma"] == "no-cache"
+        assert response.json() == {
+            "configured": True,
+            "values": {
+                "WECHAT_CONSOLE_URL": "https://console.example.test",
+                "WECHAT_IMAGE_API_KEY": image_key,
+                "WECHAT_PUBLISH_API_KEY": publish_key,
+            },
+        }
+
+        assert image_key not in client.get("/api/status").text
+        assert publish_key not in client.get("/api/overview").text
+
+    get_settings.cache_clear()

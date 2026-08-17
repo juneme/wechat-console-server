@@ -250,6 +250,15 @@ main { width: min(100%, 1500px); padding: 24px clamp(18px, 4vw, 54px) 64px; }
 .endpoint code { color: #35423a; font-size: 10px; }
 .endpoint strong { font-size: 11px; }
 .endpoint-key { color: var(--muted); font-family: monospace; font-size: 9px; }
+.skill-config-panel { border: 1px solid var(--line); border-radius: 6px; background: white; overflow: hidden; }
+.skill-config-hint { margin: 0; padding: 13px 16px; border-bottom: 1px solid var(--soft-line); color: var(--muted); background: #fafbfa; font-size: 10px; line-height: 1.6; }
+.skill-config-list { display: grid; }
+.skill-config-row { min-width: 0; min-height: 62px; padding: 10px 12px 10px 16px; display: grid; grid-template-columns: 210px minmax(0, 1fr) 64px; align-items: center; gap: 12px; border-bottom: 1px solid var(--soft-line); }
+.skill-config-row:last-child { border-bottom: 0; }
+.skill-config-row label { color: #4f5d55; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 10px; font-weight: 750; }
+.skill-config-value { width: 100%; min-width: 0; height: 34px; padding: 7px 9px; border: 1px solid #d5ddd8; border-radius: 4px; outline: none; color: #39463e; background: #f8faf8; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 10px; text-overflow: ellipsis; }
+.skill-config-value:focus { border-color: var(--accent); }
+.skill-config-panel.revealed { border-color: #cfc5e3; }
 .security-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 6px; background: white; overflow: hidden; }
 .security-grid > div { min-width: 0; padding: 18px; border-right: 1px solid var(--soft-line); }
 .security-grid > div:last-child { border-right: 0; }
@@ -298,6 +307,8 @@ main { width: min(100%, 1500px); padding: 24px clamp(18px, 4vw, 54px) 64px; }
   .check-list > div:last-child, .security-grid > div:last-child { border-bottom: 0; }
   .endpoint-list { overflow-x: auto; }
   .endpoint { min-width: 700px; }
+  .skill-config-row { grid-template-columns: 1fr 64px; gap: 8px; }
+  .skill-config-row label { grid-column: 1 / -1; }
 }
 
 @media (max-width: 560px) {

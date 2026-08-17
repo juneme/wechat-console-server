@@ -10,6 +10,8 @@ const state = {
   uploading: false,
   deleting: false,
   loadingAssets: true,
+  skillConfig: null,
+  skillConfigVisible: false,
 };
 
 const views = {
@@ -39,6 +41,9 @@ const els = {
   assetCount: $("#assetCount"), copyUrls: $("#copyUrls"), copyJson: $("#copyJson"), deleteSelected: $("#deleteSelected"),
   draftTable: $("#draftTable"), draftCount: $("#draftCount"), refreshDrafts: $("#refreshDrafts"),
   apiEndpoints: $("#apiEndpoints"), runDiagnostics: $("#runDiagnostics"), diagnosticResults: $("#diagnosticResults"),
+  toggleSkillConfig: $("#toggleSkillConfig"), copySkillConfig: $("#copySkillConfig"),
+  skillConfigPanel: $("#skillConfigPanel"), skillConfigHint: $("#skillConfigHint"),
+  skillConsoleUrl: $("#skillConsoleUrl"), skillImageKey: $("#skillImageKey"), skillPublishKey: $("#skillPublishKey"),
   confirmDialog: $("#confirmDialog"), confirmTitle: $("#confirmTitle"),
   confirmMessage: $("#confirmMessage"), confirmAction: $("#confirmAction"), toast: $("#toast"),
 };
@@ -100,6 +105,8 @@ function showView(name, updateHash = true) {
 
 function showLogin() {
   state.user = null;
+  state.skillConfig = null;
+  state.skillConfigVisible = false;
   state.files = [];
   state.assets = [];
   state.selected = new Set();
@@ -107,6 +114,7 @@ function showLogin() {
   els.authView.hidden = false;
   renderQueue();
   renderAssets();
+  renderSkillConfig();
   setTimeout(() => els.loginUsername.focus(), 0);
 }
 
@@ -282,6 +290,63 @@ function renderApiEndpoints() {
   els.apiEndpoints.innerHTML = endpoints.map(([method, path, name, ready, key]) => `<div class="endpoint"><span class="method">${method}</span><code>${path}</code><strong>${name}</strong><span class="endpoint-key">${key}</span><b class="status-pill ${ready ? "ok" : "muted"}">${ready ? "已启用" : "未配置"}</b></div>`).join("");
 }
 
+const skillConfigFields = {
+  WECHAT_CONSOLE_URL: () => els.skillConsoleUrl,
+  WECHAT_IMAGE_API_KEY: () => els.skillImageKey,
+  WECHAT_PUBLISH_API_KEY: () => els.skillPublishKey,
+};
+
+function renderSkillConfig() {
+  const values = state.skillConfig?.values || {};
+  const loaded = Boolean(state.skillConfig);
+  const visible = loaded && state.skillConfigVisible;
+  for (const [key, getField] of Object.entries(skillConfigFields)) {
+    const field = getField();
+    const value = values[key] || "";
+    field.value = loaded ? value : (key === "WECHAT_CONSOLE_URL" ? "点击“显示配置”读取" : "");
+    field.type = key === "WECHAT_CONSOLE_URL" || visible ? "text" : "password";
+    field.placeholder = loaded && !value ? "未配置" : "";
+  }
+  els.toggleSkillConfig.textContent = visible ? "隐藏配置" : "显示配置";
+  els.copySkillConfig.disabled = !loaded || !state.skillConfig.configured;
+  document.querySelectorAll(".copy-skill-value").forEach(button => {
+    button.disabled = !loaded || !values[button.dataset.configKey];
+  });
+  els.skillConfigPanel.classList.toggle("revealed", visible);
+  if (!loaded) {
+    els.skillConfigHint.textContent = "登录管理员账号后可直接读取，无需进入服务器 .env。密钥默认隐藏且不会被浏览器缓存。";
+  } else if (!state.skillConfig.configured) {
+    els.skillConfigHint.textContent = "图片或草稿 API Key 尚未配置，请重新执行部署脚本生成后再刷新。";
+  } else {
+    els.skillConfigHint.textContent = visible ? "配置已显示。复制后请妥善保管，不要发送到聊天或提交到仓库。" : "配置已读取并隐藏，可随时再次显示或直接复制。";
+  }
+}
+
+async function toggleSkillConfig() {
+  if (state.skillConfig) {
+    state.skillConfigVisible = !state.skillConfigVisible;
+    renderSkillConfig();
+    return;
+  }
+  els.toggleSkillConfig.disabled = true;
+  els.toggleSkillConfig.textContent = "读取中";
+  try {
+    state.skillConfig = await api("/api/skill-client-config", { method: "POST" });
+    state.skillConfigVisible = true;
+    renderSkillConfig();
+  } catch (error) {
+    toast(`读取配置失败：${error.message}`);
+    renderSkillConfig();
+  } finally {
+    els.toggleSkillConfig.disabled = false;
+  }
+}
+
+function skillConfigText() {
+  const values = state.skillConfig?.values || {};
+  return Object.keys(skillConfigFields).map(key => `${key}=${values[key] || ""}`).join("\n");
+}
+
 async function runDiagnostics() {
   els.runDiagnostics.disabled = true;
   els.runDiagnostics.textContent = "诊断中";
@@ -455,6 +520,13 @@ els.accountTest.addEventListener("click", testAccount);
 els.testConnection.addEventListener("click", testAccount);
 els.refreshDrafts.addEventListener("click", loadDrafts);
 els.runDiagnostics.addEventListener("click", runDiagnostics);
+els.toggleSkillConfig.addEventListener("click", toggleSkillConfig);
+els.copySkillConfig.addEventListener("click", () => copyText(skillConfigText(), "Skill 配置已复制"));
+els.skillConfigPanel.addEventListener("click", event => {
+  const button = event.target.closest(".copy-skill-value");
+  if (!button) return;
+  copyText(state.skillConfig?.values?.[button.dataset.configKey], `${button.dataset.configKey} 已复制`);
+});
 els.draftTable.addEventListener("click", event => { const button = event.target.closest(".delete-draft"); if (button) { const draft = state.drafts.find(item => item.id === Number(button.dataset.id)); if (draft) deleteDraftRecord(draft); } });
 
 els.dropZone.addEventListener("click", () => els.input.click());
@@ -482,4 +554,5 @@ els.assetTable.addEventListener("click", event => {
 });
 
 els.assetTable.addEventListener("error", event => { if (event.target.tagName === "IMG") event.target.closest(".asset-thumb")?.classList.add("broken"); }, true);
+renderSkillConfig();
 bootstrapAuth();

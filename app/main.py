@@ -644,6 +644,28 @@ async def api_status(
     }
 
 
+@app.post("/api/skill-client-config")
+async def skill_client_config(
+    request: Request,
+    response: Response,
+    _: Annotated[str, Depends(_require_auth)],
+    settings: Annotated[Settings, Depends(_settings)],
+) -> dict:
+    _require_ajax(request)
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    console_url = settings.public_base_url or str(request.base_url).rstrip("/")
+    return {
+        "configured": settings.ai_api_configured
+        and settings.publish_api_configured,
+        "values": {
+            "WECHAT_CONSOLE_URL": console_url,
+            "WECHAT_IMAGE_API_KEY": settings.ai_api_key,
+            "WECHAT_PUBLISH_API_KEY": settings.publish_api_key,
+        },
+    }
+
+
 @app.get("/api/account")
 async def get_account(
     request: Request,

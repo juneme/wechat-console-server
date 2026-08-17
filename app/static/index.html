@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light">
     <title>微信公众号控制台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v=4">
+    <link rel="stylesheet" href="/static/app.css?v=5">
   </head>
   <body>
     <section id="authView" class="auth-view" aria-labelledby="loginTitle">
@@ -120,6 +120,20 @@
 
           <section class="view" data-view-panel="api">
             <section class="content-section">
+              <div class="section-heading stack-mobile">
+                <div><p class="section-index">SKILL CONFIG</p><h2>Skill 客户端配置</h2></div>
+                <div class="header-actions"><button id="toggleSkillConfig" class="button primary" type="button">显示配置</button><button id="copySkillConfig" class="button secondary" type="button" disabled>复制全部</button></div>
+              </div>
+              <div id="skillConfigPanel" class="skill-config-panel" aria-live="polite">
+                <p id="skillConfigHint" class="skill-config-hint">登录管理员账号后可直接读取，无需进入服务器 .env。密钥默认隐藏且不会被浏览器缓存。</p>
+                <div class="skill-config-list">
+                  <div class="skill-config-row"><label for="skillConsoleUrl">WECHAT_CONSOLE_URL</label><input id="skillConsoleUrl" class="skill-config-value" type="text" readonly value="点击“显示配置”读取"><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_CONSOLE_URL" disabled>复制</button></div>
+                  <div class="skill-config-row"><label for="skillImageKey">WECHAT_IMAGE_API_KEY</label><input id="skillImageKey" class="skill-config-value" type="password" readonly value=""><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_IMAGE_API_KEY" disabled>复制</button></div>
+                  <div class="skill-config-row"><label for="skillPublishKey">WECHAT_PUBLISH_API_KEY</label><input id="skillPublishKey" class="skill-config-value" type="password" readonly value=""><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_PUBLISH_API_KEY" disabled>复制</button></div>
+                </div>
+              </div>
+            </section>
+            <section class="content-section">
               <div class="section-heading"><div><p class="section-index">ACCESS</p><h2>AI 接口</h2></div></div>
               <div id="apiEndpoints" class="endpoint-list"></div>
             </section>
@@ -138,6 +152,6 @@
       <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><h3 id="confirmTitle">确认操作</h3><p id="confirmMessage"></p><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirmAction" class="button danger" value="confirm">确认</button></div></form></dialog>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=5" defer></script>
+    <script src="/static/app.js?v=6" defer></script>
   </body>
 </html>
