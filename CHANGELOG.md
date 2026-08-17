@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.1.1 - 2026-08-18
 
 - Add an admin-only Skill client configuration panel with masked keys, one-click copying, and no-store responses.
 

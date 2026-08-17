@@ -12,7 +12,7 @@ body:
     attributes:
       label: 版本
       description: 控制台版本或发布包文件名
-      placeholder: 3.1.0
+        placeholder: 3.1.1
     validations:
       required: true
   - type: dropdown
