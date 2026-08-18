@@ -2,8 +2,13 @@ const state = {
   user: null,
   status: null,
   account: null,
+  accounts: [],
+  activeAccountId: null,
+  editingAccountId: null,
   overview: null,
   drafts: [],
+  draftTotal: 0,
+  draftHasMore: false,
   files: [],
   assets: [],
   selected: new Set(),
@@ -20,6 +25,7 @@ const views = {
   assets: ["MATERIAL LIBRARY", "素材库"],
   drafts: ["DRAFT OPERATIONS", "草稿箱"],
   api: ["API ACCESS", "API 接入"],
+  security: ["SECURITY", "安全设置"],
 };
 
 const $ = selector => document.querySelector(selector);
@@ -27,8 +33,14 @@ const els = {
   authView: $("#authView"), appShell: $("#appShell"), loginForm: $("#loginForm"),
   loginUsername: $("#loginUsername"), loginPassword: $("#loginPassword"),
   loginError: $("#loginError"), loginSubmit: $("#loginSubmit"), currentUsername: $("#currentUsername"),
+  registerForm: $("#registerForm"), registerUsername: $("#registerUsername"), registerPassword: $("#registerPassword"),
+  registerPasswordConfirm: $("#registerPasswordConfirm"), registerError: $("#registerError"), registerSubmit: $("#registerSubmit"),
+  showRegister: $("#showRegister"), showLogin: $("#showLogin"),
+  setupForm: $("#setupForm"), setupToken: $("#setupToken"), setupUsername: $("#setupUsername"), setupPassword: $("#setupPassword"),
+  setupPasswordConfirm: $("#setupPasswordConfirm"), setupError: $("#setupError"), setupSubmit: $("#setupSubmit"),
   logoutButton: $("#logoutButton"), viewKicker: $("#viewKicker"), viewTitle: $("#viewTitle"),
   connection: $("#connectionState"), testConnection: $("#testConnection"),
+  accountSwitcher: $("#accountSwitcher"),
   sidebarAccountMark: $("#sidebarAccountMark"), sidebarAccountName: $("#sidebarAccountName"), sidebarAccountId: $("#sidebarAccountId"),
   metricConnection: $("#metricConnection"), metricAccount: $("#metricAccount"), metricAssets: $("#metricAssets"),
   metricDrafts: $("#metricDrafts"), metricDraftFailures: $("#metricDraftFailures"), metricTemporary: $("#metricTemporary"),
@@ -36,16 +48,20 @@ const els = {
   accountForm: $("#accountForm"), accountName: $("#accountName"), accountType: $("#accountType"),
   accountAppId: $("#accountAppId"), accountSecret: $("#accountSecret"), accountSource: $("#accountSource"),
   accountMeta: $("#accountMeta"), accountSave: $("#accountSave"), accountTest: $("#accountTest"),
+  accountFormTitle: $("#accountFormTitle"), accountList: $("#accountList"), accountCount: $("#accountCount"),
+  newAccount: $("#newAccount"), adminSkillSection: $("#adminSkillSection"),
   input: $("#fileInput"), dropZone: $("#dropZone"), queue: $("#queue"), queueSummary: $("#queueSummary"),
   clearQueue: $("#clearQueue"), startUpload: $("#startUpload"), assetTable: $("#assetTable"),
   assetCount: $("#assetCount"), copyUrls: $("#copyUrls"), copyJson: $("#copyJson"), deleteSelected: $("#deleteSelected"),
-  draftTable: $("#draftTable"), draftCount: $("#draftCount"), refreshDrafts: $("#refreshDrafts"),
+  draftTable: $("#draftTable"), draftCount: $("#draftCount"), refreshDrafts: $("#refreshDrafts"), loadMoreDrafts: $("#loadMoreDrafts"),
   apiEndpoints: $("#apiEndpoints"), runDiagnostics: $("#runDiagnostics"), diagnosticResults: $("#diagnosticResults"),
   toggleSkillConfig: $("#toggleSkillConfig"), copySkillConfig: $("#copySkillConfig"),
   skillConfigPanel: $("#skillConfigPanel"), skillConfigHint: $("#skillConfigHint"),
   skillConsoleUrl: $("#skillConsoleUrl"), skillImageKey: $("#skillImageKey"), skillPublishKey: $("#skillPublishKey"),
   confirmDialog: $("#confirmDialog"), confirmTitle: $("#confirmTitle"),
   confirmMessage: $("#confirmMessage"), confirmAction: $("#confirmAction"), toast: $("#toast"),
+  passwordForm: $("#passwordForm"), currentPassword: $("#currentPassword"), newPassword: $("#newPassword"),
+  newPasswordConfirm: $("#newPasswordConfirm"), passwordError: $("#passwordError"), passwordSubmit: $("#passwordSubmit"),
 };
 
 function escapeHtml(value) {
@@ -103,29 +119,100 @@ function showView(name, updateHash = true) {
   window.scrollTo({ top: 0, behavior: "instant" });
 }
 
-function showLogin() {
+function resetWorkspaceState() {
   state.user = null;
+  state.status = null;
+  state.account = null;
+  state.accounts = [];
+  state.activeAccountId = null;
+  state.editingAccountId = null;
+  state.overview = null;
+  state.drafts = [];
+  state.draftTotal = 0;
+  state.draftHasMore = false;
   state.skillConfig = null;
   state.skillConfigVisible = false;
   state.files = [];
   state.assets = [];
   state.selected = new Set();
-  els.appShell.hidden = true;
-  els.authView.hidden = false;
+  state.uploading = false;
+  state.deleting = false;
+  state.loadingAssets = false;
+  els.currentUsername.textContent = "";
+  els.connection.textContent = "等待登录";
+  els.connection.className = "status-badge";
+  els.metricConnection.textContent = "未加载";
+  els.metricAccount.textContent = "未配置账号";
+  els.metricAssets.textContent = "0";
+  els.metricDrafts.textContent = "0";
+  els.metricDraftFailures.textContent = "无异常任务";
+  els.metricTemporary.textContent = "0";
+  els.overviewApis.innerHTML = '<p class="empty-state">登录后加载接口状态</p>';
+  els.recentDrafts.innerHTML = '<p class="empty-state">暂无草稿记录</p>';
+  els.apiEndpoints.innerHTML = "";
+  els.diagnosticResults.innerHTML = '<p class="empty-state">尚未运行诊断</p>';
+  updateAccountIdentity(null);
+  renderAccountList();
+  renderAccount();
+  renderDrafts();
   renderQueue();
   renderAssets();
   renderSkillConfig();
+}
+
+function showLogin() {
+  resetWorkspaceState();
+  els.appShell.hidden = true;
+  els.authView.hidden = false;
+  els.authView.setAttribute("aria-labelledby", "loginTitle");
+  els.setupForm.hidden = true;
+  els.registerForm.hidden = true;
+  els.loginForm.hidden = false;
   setTimeout(() => els.loginUsername.focus(), 0);
+}
+
+function showSetup() {
+  resetWorkspaceState();
+  els.appShell.hidden = true;
+  els.authView.hidden = false;
+  els.authView.setAttribute("aria-labelledby", "setupTitle");
+  els.loginForm.hidden = true;
+  els.registerForm.hidden = true;
+  els.setupForm.hidden = false;
+  els.setupError.textContent = "";
+  setTimeout(() => els.setupUsername.focus(), 0);
+}
+
+function showRegister() {
+  els.appShell.hidden = true;
+  els.authView.hidden = false;
+  els.authView.setAttribute("aria-labelledby", "registerTitle");
+  els.loginForm.hidden = true;
+  els.setupForm.hidden = true;
+  els.registerForm.hidden = false;
+  els.registerError.textContent = "";
+  setTimeout(() => els.registerUsername.focus(), 0);
 }
 
 function showWorkspace(user) {
   state.user = user;
   els.currentUsername.textContent = user.username;
   els.authView.hidden = true;
-  els.appShell.hidden = false;
+  els.appShell.hidden = true;
   els.loginError.textContent = "";
+  els.registerError.textContent = "";
+  els.setupError.textContent = "";
   els.loginForm.reset();
+  els.registerForm.reset();
+  els.setupForm.reset();
+  els.adminSkillSection.hidden = user.role !== "admin";
   showView(location.hash.slice(1) || "overview", false);
+}
+
+async function enterWorkspace(user) {
+  showWorkspace(user);
+  await loadWorkspace();
+  els.appShell.hidden = false;
 }
 
 function updateAccountIdentity(account) {
@@ -163,6 +250,13 @@ function draftStatus(status) {
   return ({ created: ["已写入", "ok"], failed: ["失败", "error"], unknown: ["结果待核实", "warning"], pending: ["处理中", "pending"], deleted: ["已删除", "muted"] })[status] || [status, "muted"];
 }
 
+function draftOwner(draft) {
+  if (state.user?.role !== "admin") return "";
+  const owner = draft.owner_username || "未知用户";
+  const account = draft.account_display_name || "未知公众号";
+  return `<span class="draft-owner">${escapeHtml(owner)} / ${escapeHtml(account)}</span>`;
+}
+
 function renderOverview() {
   const data = state.overview;
   if (!data) return;
@@ -182,7 +276,7 @@ function renderOverview() {
   ].join("");
   els.recentDrafts.innerHTML = data.recent_drafts.length ? data.recent_drafts.map(draft => {
     const [label, className] = draftStatus(draft.status);
-    return `<div class="compact-row"><div><strong>${escapeHtml(draft.title)}</strong><small>${formatDate(draft.updated_at)} · ${escapeHtml(draft.request_id)}</small></div><span class="status-pill ${className}">${label}</span></div>`;
+    return `<div class="compact-row"><div>${draftOwner(draft)}<strong>${escapeHtml(draft.title)}</strong><small>${formatDate(draft.updated_at)} · ${escapeHtml(draft.request_id)}</small></div><span class="status-pill ${className}">${label}</span></div>`;
   }).join("") : '<p class="empty-state">暂无草稿记录</p>';
 }
 
@@ -194,24 +288,55 @@ async function loadOverview() {
 }
 
 function renderAccount() {
-  const account = state.account;
-  if (!account) return;
-  els.accountName.value = account.display_name || "";
-  els.accountType.value = account.account_type || "subscription";
-  els.accountAppId.value = account.app_id || "";
+  const account = state.accounts.find(item => item.id === state.editingAccountId) || null;
+  els.accountFormTitle.textContent = account ? "编辑公众号" : "添加公众号";
+  els.accountName.value = account?.display_name || "";
+  els.accountType.value = account?.account_type || "subscription";
+  els.accountAppId.value = account?.app_id || "";
   els.accountSecret.value = "";
-  els.accountSource.textContent = ({ console: "控制台配置", environment: "环境变量", none: "未配置" })[account.source] || account.source;
-  const secret = account.secret_configured ? "AppSecret 已保存" : "AppSecret 未配置";
-  const encryption = account.encryption === "environment" ? "环境主密钥" : "本机密钥文件";
-  els.accountMeta.textContent = `${secret} · ${encryption}${account.updated_at ? ` · ${formatDate(account.updated_at)}` : ""}`;
-  els.accountTest.disabled = !account.secret_configured || !account.app_id;
+  els.accountSecret.required = !account;
+  els.accountSecret.placeholder = account ? "留空则保持不变" : "请输入 AppSecret";
+  els.accountSource.textContent = account ? (account.id === state.activeAccountId ? "当前公众号" : "已保存") : "新公众号";
+  if (account) {
+    const secret = account.secret_configured ? "AppSecret 已保存" : "AppSecret 未配置";
+    const encryption = account.encryption === "environment" ? "环境主密钥" : "本机密钥文件";
+    els.accountMeta.textContent = `${secret} · ${encryption}${account.updated_at ? ` · ${formatDate(account.updated_at)}` : ""}`;
+  } else {
+    els.accountMeta.textContent = state.accounts.length ? "保存后可在上方切换公众号" : "完成首个公众号配置后即可开始上传素材";
+  }
+  els.accountSave.textContent = account ? "保存修改" : "添加并启用";
+  els.accountTest.disabled = !account || account.id !== state.activeAccountId || !account.secret_configured || !account.app_id;
 }
 
-async function loadAccount() {
+function renderAccountList() {
+  els.accountCount.textContent = `${state.accounts.length} 个`;
+  els.accountSwitcher.disabled = !state.accounts.length;
+  els.accountSwitcher.innerHTML = state.accounts.length
+    ? state.accounts.map(account => `<option value="${account.id}" ${account.id === state.activeAccountId ? "selected" : ""}>${escapeHtml(account.display_name)}</option>`).join("")
+    : "<option>暂无公众号</option>";
+  if (!state.accounts.length) {
+    els.accountList.innerHTML = '<p class="empty-state">尚未添加公众号</p>';
+    return;
+  }
+  els.accountList.innerHTML = state.accounts.map(account => {
+    const active = account.id === state.activeAccountId;
+    const type = account.account_type === "service" ? "服务号" : "订阅号";
+    return `<article class="account-item ${active ? "active" : ""}" data-id="${account.id}"><span class="account-list-mark">${escapeHtml(account.display_name.slice(0, 1))}</span><div class="account-list-copy"><strong>${escapeHtml(account.display_name)}</strong><small>${type} · ${escapeHtml(account.app_id)}</small></div><span class="status-pill ${active ? "ok" : "muted"}">${active ? "当前" : "未启用"}</span><div class="account-actions">${active ? "" : `<button class="button secondary activate-account" type="button" data-id="${account.id}">切换</button>`}<button class="button secondary edit-account" type="button" data-id="${account.id}">编辑</button><button class="button danger-outline delete-account" type="button" data-id="${account.id}">删除</button></div></article>`;
+  }).join("");
+}
+
+async function loadAccounts() {
   try {
-    const result = await api("/api/account");
-    state.account = result.account;
+    const result = await api("/api/accounts");
+    state.accounts = result.items;
+    state.activeAccountId = result.active_account_id;
+    state.account = state.accounts.find(item => item.id === state.activeAccountId) || null;
+    if (state.editingAccountId !== null && !state.accounts.some(item => item.id === state.editingAccountId)) {
+      state.editingAccountId = null;
+    }
+    if (state.editingAccountId === null && state.account) state.editingAccountId = state.account.id;
     updateAccountIdentity(state.account);
+    renderAccountList();
     renderAccount();
   } catch (error) { toast(`加载公众号配置失败：${error.message}`); }
 }
@@ -227,14 +352,44 @@ async function saveAccount(event) {
   };
   if (els.accountSecret.value.trim()) payload.app_secret = els.accountSecret.value.trim();
   try {
-    const result = await api("/api/account", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    state.account = result.account;
-    renderAccount();
-    updateAccountIdentity(state.account);
-    await Promise.all([checkStatus(), loadOverview()]);
-    toast("公众号配置已保存");
+    const accountId = state.editingAccountId;
+    const url = accountId === null ? "/api/accounts" : `/api/accounts/${accountId}`;
+    const method = accountId === null ? "POST" : "PUT";
+    const result = await api(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    state.editingAccountId = result.account.id;
+    await loadAccounts();
+    await Promise.all([checkStatus(), loadOverview(), loadAssets(), loadDrafts()]);
+    toast(accountId === null ? "公众号已添加并启用" : "公众号配置已保存");
   } catch (error) { toast(error.message); }
-  finally { els.accountSave.disabled = false; els.accountSave.textContent = "保存配置"; }
+  finally { els.accountSave.disabled = false; renderAccount(); }
+}
+
+async function activateAccount(accountId) {
+  if (accountId === state.activeAccountId) return;
+  try {
+    const result = await api(`/api/accounts/${accountId}/activate`, { method: "POST" });
+    state.activeAccountId = result.account.id;
+    state.editingAccountId = result.account.id;
+    state.selected = new Set();
+    state.files = [];
+    renderQueue();
+    await loadAccounts();
+    await Promise.all([checkStatus(), loadOverview(), loadAssets(), loadDrafts()]);
+    toast(`已切换到 ${result.account.display_name}`);
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteAccount(account) {
+  const confirmed = await askConfirmation("删除公众号", `将删除“${account.display_name}”及其本地素材和草稿记录。`, "确认删除");
+  if (!confirmed) return;
+  try {
+    await api(`/api/accounts/${account.id}`, { method: "DELETE" });
+    state.editingAccountId = null;
+    state.selected = new Set();
+    await loadAccounts();
+    await Promise.all([checkStatus(), loadOverview(), loadAssets(), loadDrafts()]);
+    toast("公众号已删除");
+  } catch (error) { toast(error.message); }
 }
 
 async function testAccount() {
@@ -248,17 +403,26 @@ async function testAccount() {
   finally { buttons.forEach(button => { button.disabled = !(state.status && state.status.ready); }); }
 }
 
-async function loadDrafts() {
-  els.draftTable.innerHTML = '<p class="empty-state">正在加载草稿记录...</p>';
+async function loadDrafts(options = {}) {
+  const append = options?.append === true;
+  if (!append) els.draftTable.innerHTML = '<p class="empty-state">正在加载草稿记录...</p>';
+  els.loadMoreDrafts.disabled = true;
   try {
-    const result = await api("/api/drafts?limit=500");
-    state.drafts = result.items;
+    const offset = append ? state.drafts.length : 0;
+    const result = await api(`/api/drafts?limit=100&offset=${offset}`);
+    state.drafts = append ? [...state.drafts, ...result.items] : result.items;
+    state.draftTotal = result.count;
+    state.draftHasMore = result.has_more;
     renderDrafts();
-  } catch (error) { els.draftTable.innerHTML = `<p class="empty-state error-text">${escapeHtml(error.message)}</p>`; }
+  } catch (error) {
+    if (!append) els.draftTable.innerHTML = `<p class="empty-state error-text">${escapeHtml(error.message)}</p>`;
+    else toast(`加载更多失败：${error.message}`);
+  } finally { els.loadMoreDrafts.disabled = false; }
 }
 
 function renderDrafts() {
-  els.draftCount.textContent = `${state.drafts.length} 条`;
+  els.draftCount.textContent = `${state.draftTotal} 条`;
+  els.loadMoreDrafts.hidden = !state.draftHasMore;
   if (!state.drafts.length) {
     els.draftTable.innerHTML = '<p class="empty-state">暂无草稿任务</p>';
     return;
@@ -266,7 +430,7 @@ function renderDrafts() {
   els.draftTable.innerHTML = `<div class="draft-row table-head"><span>文章</span><span>请求标识</span><span>状态</span><span>更新时间</span><span>操作</span></div>${state.drafts.map(draft => {
     const [label, className] = draftStatus(draft.status);
     const error = draft.last_error ? `<small class="error-text">${escapeHtml(draft.last_error)}</small>` : `<small>${draft.content_characters} 字符</small>`;
-    return `<div class="draft-row"><div><strong>${escapeHtml(draft.title)}</strong>${error}</div><code>${escapeHtml(draft.request_id)}</code><span><b class="status-pill ${className}">${label}</b></span><span>${formatDate(draft.updated_at)}</span><div>${draft.status === "created" ? `<button class="button danger-outline delete-draft" data-id="${draft.id}" type="button">删除</button>` : "-"}</div></div>`;
+    return `<div class="draft-row"><div>${draftOwner(draft)}<strong>${escapeHtml(draft.title)}</strong>${error}</div><code>${escapeHtml(draft.request_id)}</code><span><b class="status-pill ${className}">${label}</b></span><span>${formatDate(draft.updated_at)}</span><div>${draft.status === "created" && draft.can_delete ? `<button class="button danger-outline delete-draft" data-id="${draft.id}" type="button">删除</button>` : "-"}</div></div>`;
   }).join("")}`;
 }
 
@@ -493,12 +657,23 @@ async function deleteRecords(assets) {
 
 async function loadWorkspace() {
   state.loadingAssets = true; renderAssets();
-  await Promise.all([checkStatus(), loadOverview(), loadAccount(), loadAssets(), loadDrafts()]);
+  await loadAccounts();
+  await Promise.all([checkStatus(), loadOverview(), loadAssets(), loadDrafts()]);
+  if (!state.accounts.length) showView("account");
 }
 
 async function bootstrapAuth() {
-  try { const result = await api("/api/auth/me"); showWorkspace(result.user); await loadWorkspace(); }
-  catch (error) { if (error.status !== 401) toast(`登录状态检查失败：${error.message}`); showLogin(); }
+  try { const result = await api("/api/auth/me"); await enterWorkspace(result.user); }
+  catch (error) {
+    if (error.status !== 401) toast(`登录状态检查失败：${error.message}`);
+    try {
+      const setup = await api("/api/setup/status");
+      if (setup.configured) showLogin(); else showSetup();
+    } catch (setupError) {
+      toast(`初始化状态检查失败：${setupError.message}`);
+      showLogin();
+    }
+  }
 }
 
 document.querySelectorAll(".nav-item").forEach(button => button.addEventListener("click", () => showView(button.dataset.view)));
@@ -509,16 +684,102 @@ els.loginForm.addEventListener("submit", async event => {
   event.preventDefault(); els.loginError.textContent = ""; els.loginSubmit.disabled = true; els.loginSubmit.textContent = "登录中";
   try {
     const result = await api("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: els.loginUsername.value, password: els.loginPassword.value }) });
-    showWorkspace(result.user); await loadWorkspace();
+    await enterWorkspace(result.user);
   } catch (error) { els.loginError.textContent = error.message; }
   finally { els.loginSubmit.disabled = false; els.loginSubmit.textContent = "登录"; }
 });
 
+els.showRegister.addEventListener("click", showRegister);
+els.showLogin.addEventListener("click", showLogin);
+els.registerForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  els.registerError.textContent = "";
+  if (els.registerPassword.value !== els.registerPasswordConfirm.value) {
+    els.registerError.textContent = "两次输入的密码不一致";
+    return;
+  }
+  els.registerSubmit.disabled = true;
+  els.registerSubmit.textContent = "正在注册";
+  try {
+    const result = await api("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: els.registerUsername.value, password: els.registerPassword.value }),
+    });
+    await enterWorkspace(result.user);
+  } catch (error) { els.registerError.textContent = error.message; }
+  finally { els.registerSubmit.disabled = false; els.registerSubmit.textContent = "注册并登录"; }
+});
+
+els.setupForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  els.setupError.textContent = "";
+  if (els.setupPassword.value !== els.setupPasswordConfirm.value) {
+    els.setupError.textContent = "两次输入的密码不一致";
+    return;
+  }
+  els.setupSubmit.disabled = true;
+  els.setupSubmit.textContent = "正在创建";
+  try {
+    const result = await api("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setup_token: els.setupToken.value, username: els.setupUsername.value, password: els.setupPassword.value }),
+    });
+    await enterWorkspace(result.user);
+    showView("account");
+  } catch (error) { els.setupError.textContent = error.message; }
+  finally { els.setupSubmit.disabled = false; els.setupSubmit.textContent = "创建管理员"; }
+});
+
 els.logoutButton.addEventListener("click", async () => { try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear locally */ } showLogin(); });
+els.passwordForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  els.passwordError.textContent = "";
+  if (els.newPassword.value !== els.newPasswordConfirm.value) {
+    els.passwordError.textContent = "两次输入的新密码不一致";
+    return;
+  }
+  const username = state.user?.username || "";
+  els.passwordSubmit.disabled = true;
+  els.passwordSubmit.textContent = "正在修改";
+  try {
+    await api("/api/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: els.currentPassword.value, new_password: els.newPassword.value }),
+    });
+    els.passwordForm.reset();
+    showLogin();
+    els.loginUsername.value = username;
+    toast("密码已修改，请重新登录");
+  } catch (error) { els.passwordError.textContent = error.message; }
+  finally { els.passwordSubmit.disabled = false; els.passwordSubmit.textContent = "修改并重新登录"; }
+});
 els.accountForm.addEventListener("submit", saveAccount);
+els.newAccount.addEventListener("click", () => {
+  state.editingAccountId = null;
+  renderAccount();
+  els.accountName.focus();
+});
+els.accountSwitcher.addEventListener("change", event => activateAccount(Number(event.target.value)));
+els.accountList.addEventListener("click", event => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  const account = state.accounts.find(item => item.id === Number(button.dataset.id));
+  if (!account) return;
+  if (button.classList.contains("activate-account")) activateAccount(account.id);
+  if (button.classList.contains("edit-account")) {
+    state.editingAccountId = account.id;
+    renderAccount();
+    els.accountName.focus();
+  }
+  if (button.classList.contains("delete-account")) deleteAccount(account);
+});
 els.accountTest.addEventListener("click", testAccount);
 els.testConnection.addEventListener("click", testAccount);
 els.refreshDrafts.addEventListener("click", loadDrafts);
+els.loadMoreDrafts.addEventListener("click", () => loadDrafts({ append: true }));
 els.runDiagnostics.addEventListener("click", runDiagnostics);
 els.toggleSkillConfig.addEventListener("click", toggleSkillConfig);
 els.copySkillConfig.addEventListener("click", () => copyText(skillConfigText(), "Skill 配置已复制"));

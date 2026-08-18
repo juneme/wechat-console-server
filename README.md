@@ -1,6 +1,6 @@
 # 微信公众号控制台
 
-一个部署在服务器上的微信公众号管理控制台。它集中管理公众号凭据、微信连接、图片素材、AI 接口和草稿任务；AppSecret 仅在服务端加密保存，浏览器和 AI 客户端都无法读取。
+一个部署在服务器上的多用户微信公众号管理控制台。每个用户可以管理和切换多个订阅号或服务号，公众号凭据、图片素材和草稿记录相互隔离；AppSecret 仅在服务端加密保存，浏览器和 AI 客户端都无法读取。
 
 配套的 [`wechat-article-designer`](https://github.com/juneme/wechat-article-designer) Codex Skill 独立维护。完整链路是：Codex 设计文章，控制台代管微信凭据并上传图片，用户确认后写入微信公众号草稿箱。
 
@@ -13,17 +13,17 @@ cp .env.example .env
 bash install.sh
 ```
 
-打开 `http://服务器IP:8787`，使用 `.env` 中的管理员账号登录，在“公众号设置”保存 AppID 和 AppSecret，并把服务器出口 IPv4 加入微信公众平台白名单。进入“API 接口”后点击“开始诊断”，确认数据库、微信连接和两类 Skill API Key 均正常。
+`install.sh` 会输出一次性初始化码。先把 HTTPS 域名反向代理到 `http://127.0.0.1:8787`，再用该初始化码创建管理员账号和密码。控制台会生成并加密保存三类 API Key，随后进入“公众号设置”添加首个公众号。其他用户可从登录页自行注册，并分别添加、切换和管理自己的订阅号或服务号。把服务器出口 IPv4 加入各公众号的微信公众平台白名单后，在“API 接入”运行诊断。
 
 ### 2. 获取 Skill 客户端配置
 
-登录控制台，打开“API 接入 → Skill 客户端配置”，点击“显示配置”即可查看并复制三个客户端变量。API Key 默认隐藏，配置响应不会被浏览器缓存。
+使用管理员账号登录控制台，打开“API 接入 → Skill 客户端配置”，点击“显示配置”即可查看并复制三个客户端变量。普通用户不会显示该配置区；API Key 默认隐藏，配置响应不会被浏览器缓存。
 
 命令行方式保留作为服务器维护备用：
 
 ```bash
-bash show-client-config.sh --url http://服务器IP:8787
-bash show-client-config.sh --url http://服务器IP:8787 --show-secrets
+bash show-client-config.sh --url https://你的控制台域名
+bash show-client-config.sh --url https://你的控制台域名 --show-secrets
 ```
 
 第二条命令需要人工确认，随后输出 `WECHAT_CONSOLE_URL`、`WECHAT_IMAGE_API_KEY` 和 `WECHAT_PUBLISH_API_KEY`。不要把面板或命令输出提交到 Git、Issue、截图或聊天记录。
@@ -48,12 +48,24 @@ git clone https://github.com/juneme/wechat-article-designer.git "$env:USERPROFIL
 
 ## 控制台能力
 
-- 在网页中配置公众号名称、类型、AppID 和 AppSecret，无需重启容器。
+- 登录页开放用户自行注册，管理员与普通用户权限分离。
+- 每个用户可添加、切换、编辑和删除多个订阅号或服务号，无需重启容器。
+- 普通用户的公众号、素材、临时图片和草稿任务按归属隔离；管理员可只读查看全部用户的草稿归属。
 - 统一查看微信连接、素材、草稿任务和 AI API 状态。
 - 上传永久素材、正文图片，或使用服务器临时托管作为备选。
 - 通过独立 Bearer Key 向 AI 提供图片上传和草稿写入接口。
 - 对草稿请求执行 HTML、图片来源、字符数和幂等校验。
 - 在“API 接口”页面执行不回传密钥的数据库、微信连接和 API 配置诊断。
+
+## 用户与多公众号
+
+管理员完成首次初始化后，登录页会显示注册入口。注册用户默认角色为普通用户，只能读取和操作自己的公众号及业务数据，不能读取管理员专属的 Skill API Key。密码修改只会注销当前用户的全部会话，不影响其他用户。
+
+普通用户可通过登录会话调用 `POST /api/drafts`，把文章写入自己当前公众号；草稿页只显示当前公众号下自己的记录。管理员的草稿页和总览会汇总所有用户、所有公众号的草稿，并在每条记录前标出“用户名 / 公众号”；管理员只能删除自己名下的草稿，他人的记录保持只读。草稿列表使用分页加载。“打开微信公众平台”会在新标签进入官方登录入口，登录后再从微信后台进入草稿箱，避免依赖会过期的动态网页 token。
+
+“公众号设置”支持多个账号。新增账号会自动设为当前公众号；顶部选择器或账号列表可切换当前公众号，切换后总览、微信素材和草稿记录会同步刷新。临时托管图片属于用户，可在该用户的不同公众号之间复用。删除公众号会级联删除该公众号的本地素材和草稿记录，不会批量调用微信接口删除远端内容。
+
+Bearer Key 的图片和草稿 API 归管理员所有。未传请求头时使用管理员当前公众号；传入 `X-Wechat-Account-ID: <公众号ID>` 可指定管理员名下的其他公众号。普通注册用户的公众号不能通过管理员 API Key 访问。
 
 ## 上传模式
 
@@ -66,7 +78,7 @@ git clone https://github.com/juneme/wechat-article-designer.git "$env:USERPROFIL
 
 临时托管和正文模式会剥离图片元数据，并在需要时缩小尺寸、压缩到 1MB 以下。上传记录保存在 SQLite，刷新页面后会自动恢复。页面支持单条删除、勾选批量删除和全部删除：永久素材会同步调用微信删除接口；服务器托管会删除本地文件；正文图片没有微信撤销接口，只删除本地历史记录。
 
-服务器临时托管默认最多占用 5GB，可通过 `TEMP_STORAGE_MAX_BYTES` 调整。超过 4000 万像素的图片会被拒绝，防止异常图片耗尽内存。
+服务器临时托管默认最多占用 5GB、每用户最多 500MB，可分别通过 `TEMP_STORAGE_MAX_BYTES` 和 `TEMP_USER_STORAGE_MAX_BYTES` 调整。注册请求按来源和全局限流，用户总数及单用户公众号数量由 `MAX_USERS`、`MAX_ACCOUNTS_PER_USER` 限制。超过 4000 万像素的图片会被拒绝，防止异常图片耗尽内存。
 
 ## 临时图片 API
 
@@ -99,13 +111,13 @@ curl 'https://photos.example.com/api/v1/temp-images?limit=500' \
 ```bash
 cd wechat-material-uploader
 cp .env.example .env
-# 编辑 .env；ADMIN_PASSWORD 必填，微信密钥可在控制台补填
+# 所有配置均可留空，首次访问时由初始化界面引导配置
 docker compose up -d --build
 docker compose ps
 curl http://127.0.0.1:8787/healthz
 ```
 
-应用绑定服务器所有 IPv4 接口的 `8787` 端口，可通过 `http://服务器IP:8787` 访问。缺少微信密钥时，临时托管和临时图片 API 仍可用，三个微信上传模式会提示未配置。生产环境建议修改 [nginx/wechat-uploader.conf](nginx/wechat-uploader.conf) 中的域名和证书路径，再由 Nginx 提供 HTTPS，并在防火墙中限制 `8787` 端口的访问来源。打开页面后，使用 `.env` 中的管理账号和密码登录。
+应用只绑定服务器本机 `127.0.0.1:8787`，必须通过 [nginx/wechat-uploader.conf](nginx/wechat-uploader.conf) 所示的 HTTPS 反向代理访问。全新数据库会生成 `/data/.wechat-setup-token`；`install.sh` 在私密终端显示该一次性初始化码，初始化成功后立即删除。管理员密码以 Argon2 哈希保存，API Key 使用本地密钥加密保存。
 
 更新：
 
@@ -157,10 +169,8 @@ Windows PowerShell 可用：
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
-$env:WECHAT_APP_ID="wx..."
-$env:WECHAT_APP_SECRET="..."
-$env:ADMIN_PASSWORD="至少十二位随机密码"
 $env:DATABASE_PATH=".\data\uploader.sqlite3"
+$env:TEMP_STORAGE_PATH=".\data\temp-images"
 uvicorn app.main:app --reload
 ```
 
@@ -168,7 +178,7 @@ uvicorn app.main:app --reload
 
 ```bash
 python scripts/build_release.py
-python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.1.1-$(date +%Y%m%d).zip
+python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.0-$(date +%Y%m%d).zip
 ```
 
 服务端包只包含控制台、部署脚本和服务端文档，并使用白名单排除 `.env`、SQLite、密钥、缓存、旧产物及 Skill 源码；ZIP 内的 `RELEASE-MANIFEST.sha256` 可校验每个文件。Skill 在独立仓库中发布。

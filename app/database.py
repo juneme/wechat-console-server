@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -120,6 +120,63 @@ class AssetStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS admin_credentials (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    username TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS service_credentials (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    ai_api_key_ciphertext TEXT NOT NULL,
+                    publish_api_key_ciphertext TEXT NOT NULL,
+                    temp_api_key_ciphertext TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+                    active_account_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS official_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    display_name TEXT NOT NULL,
+                    account_type TEXT NOT NULL CHECK (
+                        account_type IN ('subscription', 'service')
+                    ),
+                    app_id TEXT NOT NULL,
+                    app_secret_ciphertext TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, app_id)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_official_accounts_user "
+                "ON official_accounts(user_id, updated_at DESC)"
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS wechat_account (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     display_name TEXT NOT NULL,
@@ -172,6 +229,210 @@ class AssetStore:
                     (_now(),),
                 )
                 connection.execute("PRAGMA user_version = 1")
+            if current_version < 2:
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
+                    "VALUES (2, ?)",
+                    (_now(),),
+                )
+                connection.execute("PRAGMA user_version = 2")
+            if current_version < 3:
+                self._migrate_to_v3(connection)
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
+                    "VALUES (3, ?)",
+                    (_now(),),
+                )
+                connection.execute("PRAGMA user_version = 3")
+
+    def _migrate_to_v3(self, connection: sqlite3.Connection) -> None:
+        now = _now()
+        admin = connection.execute(
+            "SELECT username, password_hash, created_at, updated_at "
+            "FROM admin_credentials WHERE id = 1"
+        ).fetchone()
+        if admin:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO users (
+                    username, password_hash, role, created_at, updated_at
+                ) VALUES (?, ?, 'admin', ?, ?)
+                """,
+                (
+                    admin["username"],
+                    admin["password_hash"],
+                    admin["created_at"],
+                    admin["updated_at"],
+                ),
+            )
+        admin_user = connection.execute(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+        ).fetchone()
+        admin_user_id = int(admin_user["id"]) if admin_user else None
+
+        legacy_account = connection.execute(
+            "SELECT * FROM wechat_account WHERE id = 1"
+        ).fetchone()
+        if legacy_account and admin_user_id is not None:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO official_accounts (
+                    user_id, display_name, account_type, app_id,
+                    app_secret_ciphertext, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    admin_user_id,
+                    legacy_account["display_name"],
+                    legacy_account["account_type"],
+                    legacy_account["app_id"],
+                    legacy_account["app_secret_ciphertext"],
+                    legacy_account["created_at"],
+                    legacy_account["updated_at"],
+                ),
+            )
+        first_account = (
+            connection.execute(
+                "SELECT id FROM official_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+                (admin_user_id,),
+            ).fetchone()
+            if admin_user_id is not None
+            else None
+        )
+        account_id = int(first_account["id"]) if first_account else None
+        if admin_user_id is not None and account_id is not None:
+            connection.execute(
+                "UPDATE users SET active_account_id = ?, updated_at = ? WHERE id = ?",
+                (account_id, now, admin_user_id),
+            )
+
+        connection.execute("DROP TABLE admin_sessions")
+        connection.execute(
+            """
+            CREATE TABLE admin_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX idx_admin_sessions_expires_at "
+            "ON admin_sessions(expires_at)"
+        )
+
+        connection.execute("DROP INDEX IF EXISTS idx_assets_updated_at")
+        connection.execute("ALTER TABLE assets RENAME TO assets_v2")
+        connection.execute(
+            """
+            CREATE TABLE assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                account_id INTEGER REFERENCES official_accounts(id) ON DELETE CASCADE,
+                sha256 TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                processed_bytes INTEGER,
+                width INTEGER,
+                height INTEGER,
+                media_id TEXT,
+                material_url TEXT,
+                article_url TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(account_id, sha256)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO assets (
+                id, user_id, account_id, sha256, filename, content_type,
+                original_bytes, processed_bytes, width, height, media_id,
+                material_url, article_url, last_error, created_at, updated_at
+            )
+            SELECT id, ?, ?, sha256, filename, content_type, original_bytes,
+                   processed_bytes, width, height, media_id, material_url,
+                   article_url, last_error, created_at, updated_at
+            FROM assets_v2
+            """,
+            (admin_user_id, account_id),
+        )
+        connection.execute("DROP TABLE assets_v2")
+        connection.execute(
+            "CREATE INDEX idx_assets_updated_at ON assets(updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_assets_account ON assets(user_id, account_id, updated_at DESC)"
+        )
+
+        connection.execute("ALTER TABLE temporary_assets ADD COLUMN user_id INTEGER")
+        if admin_user_id is not None:
+            connection.execute(
+                "UPDATE temporary_assets SET user_id = ? WHERE user_id IS NULL",
+                (admin_user_id,),
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_temporary_assets_user "
+            "ON temporary_assets(user_id, created_at DESC)"
+        )
+
+        connection.execute("DROP INDEX IF EXISTS idx_draft_jobs_updated_at")
+        connection.execute("ALTER TABLE draft_jobs RENAME TO draft_jobs_v2")
+        connection.execute(
+            """
+            CREATE TABLE draft_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                account_id INTEGER REFERENCES official_accounts(id) ON DELETE CASCADE,
+                request_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_source_url TEXT NOT NULL,
+                thumb_media_id TEXT NOT NULL,
+                need_open_comment INTEGER NOT NULL,
+                only_fans_can_comment INTEGER NOT NULL,
+                media_id TEXT,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, account_id, request_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO draft_jobs (
+                id, user_id, account_id, request_id, content_hash, title,
+                author, digest, content, content_source_url, thumb_media_id,
+                need_open_comment, only_fans_can_comment, media_id, status,
+                last_error, created_at, updated_at
+            )
+            SELECT id, ?, ?, request_id, content_hash, title, author, digest,
+                   content, content_source_url, thumb_media_id,
+                   need_open_comment, only_fans_can_comment, media_id, status,
+                   last_error, created_at, updated_at
+            FROM draft_jobs_v2
+            """,
+            (admin_user_id, account_id),
+        )
+        connection.execute("DROP TABLE draft_jobs_v2")
+        connection.execute(
+            "CREATE INDEX idx_draft_jobs_updated_at ON draft_jobs(updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_draft_jobs_account "
+            "ON draft_jobs(user_id, account_id, updated_at DESC)"
+        )
 
     def schema_version(self) -> int:
         with self._connect() as connection:
@@ -200,7 +461,12 @@ class AssetStore:
         }
 
     def create_admin_session(
-        self, *, token_hash: str, username: str, expires_at: str
+        self,
+        *,
+        token_hash: str,
+        username: str,
+        expires_at: str,
+        user_id: int | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -209,11 +475,213 @@ class AssetStore:
             connection.execute(
                 """
                 INSERT INTO admin_sessions (
-                    token_hash, username, created_at, expires_at
-                ) VALUES (?, ?, ?, ?)
+                    token_hash, user_id, username, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (token_hash, username, _now(), expires_at),
+                (token_hash, user_id, username, _now(), expires_at),
             )
+
+    def get_user_by_id(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_admin_user(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_user(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        role: str = "user",
+        max_users: int | None = None,
+    ) -> dict[str, Any] | None:
+        now = _now()
+        try:
+            with self._connect() as connection:
+                if max_users is not None:
+                    connection.execute("BEGIN IMMEDIATE")
+                    total = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM users"
+                        ).fetchone()[0]
+                    )
+                    if total >= max_users:
+                        return None
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users (
+                        username, password_hash, role, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (username, password_hash, role, now, now),
+                )
+                row = connection.execute(
+                    "SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)
+                ).fetchone()
+        except sqlite3.IntegrityError:
+            return None
+        return dict(row) if row else None
+
+    def count_users(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()
+        return int(row["total"]) if row else 0
+
+    def _claim_unassigned_legacy_data(
+        self, connection: sqlite3.Connection, user_id: int
+    ) -> None:
+        account = connection.execute(
+            "SELECT id FROM official_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if account is None:
+            legacy = connection.execute(
+                "SELECT * FROM wechat_account WHERE id = 1"
+            ).fetchone()
+            if legacy:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO official_accounts (
+                        user_id, display_name, account_type, app_id,
+                        app_secret_ciphertext, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        legacy["display_name"],
+                        legacy["account_type"],
+                        legacy["app_id"],
+                        legacy["app_secret_ciphertext"],
+                        legacy["created_at"],
+                        legacy["updated_at"],
+                    ),
+                )
+                account = {"id": int(cursor.lastrowid)}
+        account_id = int(account["id"]) if account else None
+        if account_id is not None:
+            connection.execute(
+                "UPDATE users SET active_account_id = ?, updated_at = ? WHERE id = ?",
+                (account_id, _now(), user_id),
+            )
+            connection.execute(
+                "UPDATE assets SET user_id = ?, account_id = ? "
+                "WHERE user_id IS NULL AND account_id IS NULL",
+                (user_id, account_id),
+            )
+            connection.execute(
+                "UPDATE draft_jobs SET user_id = ?, account_id = ? "
+                "WHERE user_id IS NULL AND account_id IS NULL",
+                (user_id, account_id),
+            )
+        connection.execute(
+            "UPDATE temporary_assets SET user_id = ? WHERE user_id IS NULL",
+            (user_id,),
+        )
+
+    def get_admin_credentials(self) -> dict[str, Any] | None:
+        return self.get_admin_user()
+
+    def initialize_admin_credentials(self, username: str, password_hash: str) -> bool:
+        now = _now()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users (
+                        username, password_hash, role, created_at, updated_at
+                    ) VALUES (?, ?, 'admin', ?, ?)
+                    """,
+                    (username, password_hash, now, now),
+                )
+                self._claim_unassigned_legacy_data(
+                    connection, int(cursor.lastrowid)
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def initialize_console_credentials(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        ai_api_key_ciphertext: str,
+        publish_api_key_ciphertext: str,
+        temp_api_key_ciphertext: str,
+    ) -> bool:
+        now = _now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO users (
+                    username, password_hash, role, created_at, updated_at
+                ) VALUES (?, ?, 'admin', ?, ?)
+                """,
+                (username, password_hash, now, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            connection.execute(
+                """
+                INSERT INTO service_credentials (
+                    id, ai_api_key_ciphertext, publish_api_key_ciphertext,
+                    temp_api_key_ciphertext, created_at, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ai_api_key_ciphertext,
+                    publish_api_key_ciphertext,
+                    temp_api_key_ciphertext,
+                    now,
+                    now,
+                ),
+            )
+            self._claim_unassigned_legacy_data(
+                connection, int(cursor.lastrowid)
+            )
+        return True
+
+    def get_service_credentials(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM service_credentials WHERE id = 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def change_admin_password_hash(self, password_hash: str) -> int:
+        admin = self.get_admin_user()
+        if admin is None:
+            raise RuntimeError("管理员凭据尚未初始化")
+        return self.change_user_password_hash(int(admin["id"]), password_hash)
+
+    def change_user_password_hash(self, user_id: int, password_hash: str) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (password_hash, _now(), user_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("管理员凭据尚未初始化")
+            revoked = connection.execute(
+                "DELETE FROM admin_sessions WHERE user_id = ?", (user_id,)
+            ).rowcount
+        return revoked
 
     def get_admin_session(
         self, token_hash: str, *, active_after: str | None = None
@@ -244,18 +712,35 @@ class AssetStore:
             )
         return cursor.rowcount
 
-    def get_by_hash(self, sha256: str) -> dict[str, Any] | None:
+    def get_by_hash(
+        self,
+        sha256: str,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM assets WHERE sha256 = ?"
+        values: list[Any] = [sha256]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values.append(user_id)
+        if account_id is not None:
+            query += " AND account_id = ?"
+            values.append(account_id)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM assets WHERE sha256 = ?", (sha256,)
-            ).fetchone()
+            row = connection.execute(query, values).fetchone()
         return dict(row) if row else None
 
-    def get_asset(self, asset_id: int) -> dict[str, Any] | None:
+    def get_asset(
+        self, asset_id: int, *, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM assets WHERE id = ?"
+        values: tuple[Any, ...] = (asset_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (asset_id, user_id)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM assets WHERE id = ?", (asset_id,)
-            ).fetchone()
+            row = connection.execute(query, values).fetchone()
         return dict(row) if row else None
 
     def upsert_source(
@@ -267,16 +752,18 @@ class AssetStore:
         original_bytes: int,
         width: int,
         height: int,
+        user_id: int | None = None,
+        account_id: int | None = None,
     ) -> dict[str, Any]:
         now = _now()
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO assets (
-                    sha256, filename, content_type, original_bytes,
+                    user_id, account_id, sha256, filename, content_type, original_bytes,
                     width, height, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(sha256) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, sha256) DO UPDATE SET
                     filename = excluded.filename,
                     content_type = excluded.content_type,
                     original_bytes = excluded.original_bytes,
@@ -285,6 +772,8 @@ class AssetStore:
                     updated_at = excluded.updated_at
                 """,
                 (
+                    user_id,
+                    account_id,
                     sha256,
                     filename,
                     content_type,
@@ -295,7 +784,9 @@ class AssetStore:
                     now,
                 ),
             )
-        return self.get_by_hash(sha256) or {}
+        return self.get_by_hash(
+            sha256, user_id=user_id, account_id=account_id
+        ) or {}
 
     def update_result(
         self,
@@ -306,6 +797,8 @@ class AssetStore:
         article_url: str | None = None,
         processed_bytes: int | None = None,
         last_error: str | None = None,
+        user_id: int | None = None,
+        account_id: int | None = None,
     ) -> dict[str, Any]:
         updates: list[str] = ["updated_at = ?", "last_error = ?"]
         values: list[Any] = [_now(), last_error]
@@ -319,30 +812,60 @@ class AssetStore:
             if value is not None:
                 updates.append(f"{column} = ?")
                 values.append(value)
+        where = ["sha256 = ?"]
         values.append(sha256)
+        if user_id is not None:
+            where.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            where.append("account_id = ?")
+            values.append(account_id)
         with self._connect() as connection:
             connection.execute(
-                f"UPDATE assets SET {', '.join(updates)} WHERE sha256 = ?", values
+                f"UPDATE assets SET {', '.join(updates)} WHERE {' AND '.join(where)}",
+                values,
             )
-        return self.get_by_hash(sha256) or {}
+        return self.get_by_hash(
+            sha256, user_id=user_id, account_id=account_id
+        ) or {}
 
-    def list_assets(self, limit: int | None = 500) -> list[dict[str, Any]]:
+    def list_assets(
+        self,
+        limit: int | None = 500,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        filters = []
+        values: list[Any] = []
+        if user_id is not None:
+            filters.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("account_id = ?")
+            values.append(account_id)
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
         with self._connect() as connection:
             if limit is None:
                 rows = connection.execute(
-                    "SELECT * FROM assets ORDER BY updated_at DESC"
+                    f"SELECT * FROM assets{where} ORDER BY updated_at DESC", values
                 ).fetchall()
             else:
                 safe_limit = min(max(limit, 1), 2000)
                 rows = connection.execute(
-                    "SELECT * FROM assets ORDER BY updated_at DESC LIMIT ?",
-                    (safe_limit,),
+                    f"SELECT * FROM assets{where} ORDER BY updated_at DESC LIMIT ?",
+                    [*values, safe_limit],
                 ).fetchall()
         return [dict(row) for row in rows]
 
-    def delete_asset(self, asset_id: int) -> bool:
+    def delete_asset(self, asset_id: int, *, user_id: int | None = None) -> bool:
+        query = "DELETE FROM assets WHERE id = ?"
+        values: tuple[Any, ...] = (asset_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (asset_id, user_id)
         with self._connect() as connection:
-            cursor = connection.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+            cursor = connection.execute(query, values)
         return cursor.rowcount > 0
 
     def create_temporary_asset(
@@ -358,18 +881,20 @@ class AssetStore:
         width: int,
         height: int,
         expires_at: str,
+        user_id: int | None = None,
     ) -> dict[str, Any]:
         created_at = _now()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO temporary_assets (
-                    token, sha256, filename, stored_name, content_type,
+                    user_id, token, sha256, filename, stored_name, content_type,
                     original_bytes, processed_bytes, width, height,
                     created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    user_id,
                     token,
                     sha256,
                     filename,
@@ -395,37 +920,50 @@ class AssetStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def get_temporary_asset_by_id(self, asset_id: int) -> dict[str, Any] | None:
+    def get_temporary_asset_by_id(
+        self, asset_id: int, *, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM temporary_assets WHERE id = ?"
+        values: tuple[Any, ...] = (asset_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (asset_id, user_id)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM temporary_assets WHERE id = ?", (asset_id,)
-            ).fetchone()
+            row = connection.execute(query, values).fetchone()
         return dict(row) if row else None
 
     def list_temporary_assets(
-        self, *, limit: int | None = 500, active_after: str | None = None
+        self,
+        *,
+        limit: int | None = 500,
+        active_after: str | None = None,
+        user_id: int | None = None,
     ) -> list[dict[str, Any]]:
         cutoff = active_after or _now()
+        user_filter = " AND user_id = ?" if user_id is not None else ""
+        values: list[Any] = [cutoff]
+        if user_id is not None:
+            values.append(user_id)
         with self._connect() as connection:
             if limit is None:
                 rows = connection.execute(
                     """
                     SELECT * FROM temporary_assets
-                    WHERE expires_at > ?
+                    WHERE expires_at > ?{user_filter}
                     ORDER BY created_at DESC
-                    """,
-                    (cutoff,),
+                    """.format(user_filter=user_filter),
+                    values,
                 ).fetchall()
             else:
                 safe_limit = min(max(limit, 1), 2000)
                 rows = connection.execute(
                     """
                     SELECT * FROM temporary_assets
-                    WHERE expires_at > ?
+                    WHERE expires_at > ?{user_filter}
                     ORDER BY created_at DESC
                     LIMIT ?
-                    """,
-                    (cutoff, safe_limit),
+                    """.format(user_filter=user_filter),
+                    [*values, safe_limit],
                 ).fetchall()
         return [dict(row) for row in rows]
 
@@ -439,33 +977,45 @@ class AssetStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_all_temporary_assets(self) -> list[dict[str, Any]]:
+    def list_all_temporary_assets(
+        self, *, user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        where = " WHERE user_id = ?" if user_id is not None else ""
+        values = (user_id,) if user_id is not None else ()
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM temporary_assets ORDER BY created_at DESC"
+                f"SELECT * FROM temporary_assets{where} ORDER BY created_at DESC",
+                values,
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def delete_temporary_asset(self, asset_id: int) -> bool:
+    def delete_temporary_asset(
+        self, asset_id: int, *, user_id: int | None = None
+    ) -> bool:
+        query = "DELETE FROM temporary_assets WHERE id = ?"
+        values: tuple[Any, ...] = (asset_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (asset_id, user_id)
         with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM temporary_assets WHERE id = ?", (asset_id,)
-            )
+            cursor = connection.execute(query, values)
         return cursor.rowcount > 0
 
-    def temporary_storage_bytes(self) -> int:
+    def temporary_storage_bytes(self, *, user_id: int | None = None) -> int:
+        query = "SELECT COALESCE(SUM(processed_bytes), 0) AS total FROM temporary_assets"
+        values: tuple[Any, ...] = ()
+        if user_id is not None:
+            query += " WHERE user_id = ?"
+            values = (user_id,)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COALESCE(SUM(processed_bytes), 0) AS total FROM temporary_assets"
-            ).fetchone()
+            row = connection.execute(query, values).fetchone()
         return int(row["total"]) if row else 0
 
     def get_wechat_account(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM wechat_account WHERE id = 1"
-            ).fetchone()
-        return dict(row) if row else None
+        admin = self.get_admin_user()
+        if admin is None:
+            return None
+        return self.get_active_official_account(int(admin["id"]))
 
     def upsert_wechat_account(
         self,
@@ -475,44 +1025,210 @@ class AssetStore:
         app_id: str,
         app_secret_ciphertext: str,
     ) -> dict[str, Any]:
-        now = _now()
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO wechat_account (
-                    id, display_name, account_type, app_id,
-                    app_secret_ciphertext, created_at, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    account_type = excluded.account_type,
-                    app_id = excluded.app_id,
-                    app_secret_ciphertext = excluded.app_secret_ciphertext,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    display_name,
-                    account_type,
-                    app_id,
-                    app_secret_ciphertext,
-                    now,
-                    now,
-                ),
-            )
-        return self.get_wechat_account() or {}
+        admin = self.get_admin_user()
+        if admin is None:
+            raise RuntimeError("管理员凭据尚未初始化")
+        user_id = int(admin["id"])
+        current = self.get_active_official_account(user_id)
+        if current:
+            return self.update_official_account(
+                int(current["id"]),
+                user_id=user_id,
+                display_name=display_name,
+                account_type=account_type,
+                app_id=app_id,
+                app_secret_ciphertext=app_secret_ciphertext,
+            ) or {}
+        return self.create_official_account(
+            user_id=user_id,
+            display_name=display_name,
+            account_type=account_type,
+            app_id=app_id,
+            app_secret_ciphertext=app_secret_ciphertext,
+        ) or {}
 
-    def get_draft_job_by_request_id(self, request_id: str) -> dict[str, Any] | None:
+    def list_official_accounts(self, user_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM official_accounts WHERE user_id = ? "
+                "ORDER BY updated_at DESC, id DESC",
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_official_account(
+        self, account_id: int, *, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM official_accounts WHERE id = ?"
+        values: tuple[Any, ...] = (account_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (account_id, user_id)
+        with self._connect() as connection:
+            row = connection.execute(query, values).fetchone()
+        return dict(row) if row else None
+
+    def get_active_official_account(self, user_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM draft_jobs WHERE request_id = ?", (request_id,)
+                """
+                SELECT account.* FROM users
+                LEFT JOIN official_accounts AS account
+                  ON account.id = users.active_account_id
+                 AND account.user_id = users.id
+                WHERE users.id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if row and row["id"] is not None:
+                return dict(row)
+            row = connection.execute(
+                "SELECT * FROM official_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+                (user_id,),
             ).fetchone()
         return dict(row) if row else None
 
-    def get_draft_job(self, draft_id: int) -> dict[str, Any] | None:
+    def create_official_account(
+        self,
+        *,
+        user_id: int,
+        display_name: str,
+        account_type: str,
+        app_id: str,
+        app_secret_ciphertext: str,
+    ) -> dict[str, Any] | None:
+        now = _now()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO official_accounts (
+                        user_id, display_name, account_type, app_id,
+                        app_secret_ciphertext, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        display_name,
+                        account_type,
+                        app_id,
+                        app_secret_ciphertext,
+                        now,
+                        now,
+                    ),
+                )
+                account_id = int(cursor.lastrowid)
+                connection.execute(
+                    "UPDATE users SET active_account_id = ?, updated_at = ? "
+                    "WHERE id = ? AND active_account_id IS NULL",
+                    (account_id, now, user_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM official_accounts WHERE id = ?", (account_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError:
+            return None
+        return dict(row) if row else None
+
+    def update_official_account(
+        self,
+        account_id: int,
+        *,
+        user_id: int,
+        display_name: str,
+        account_type: str,
+        app_id: str,
+        app_secret_ciphertext: str,
+    ) -> dict[str, Any] | None:
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE official_accounts
+                    SET display_name = ?, account_type = ?, app_id = ?,
+                        app_secret_ciphertext = ?, updated_at = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (
+                        display_name,
+                        account_type,
+                        app_id,
+                        app_secret_ciphertext,
+                        _now(),
+                        account_id,
+                        user_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                row = connection.execute(
+                    "SELECT * FROM official_accounts WHERE id = ?", (account_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError:
+            return None
+        return dict(row) if row else None
+
+    def set_active_official_account(self, user_id: int, account_id: int) -> bool:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM draft_jobs WHERE id = ?", (draft_id,)
+            owned = connection.execute(
+                "SELECT 1 FROM official_accounts WHERE id = ? AND user_id = ?",
+                (account_id, user_id),
             ).fetchone()
+            if not owned:
+                return False
+            connection.execute(
+                "UPDATE users SET active_account_id = ?, updated_at = ? WHERE id = ?",
+                (account_id, _now(), user_id),
+            )
+        return True
+
+    def delete_official_account(self, account_id: int, *, user_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM official_accounts WHERE id = ? AND user_id = ?",
+                (account_id, user_id),
+            )
+            if cursor.rowcount != 1:
+                return False
+            replacement = connection.execute(
+                "SELECT id FROM official_accounts WHERE user_id = ? ORDER BY id LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            connection.execute(
+                "UPDATE users SET active_account_id = ?, updated_at = ? WHERE id = ?",
+                (int(replacement["id"]) if replacement else None, _now(), user_id),
+            )
+        return True
+
+    def get_draft_job_by_request_id(
+        self,
+        request_id: str,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM draft_jobs WHERE request_id = ?"
+        values: list[Any] = [request_id]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values.append(user_id)
+        if account_id is not None:
+            query += " AND account_id = ?"
+            values.append(account_id)
+        with self._connect() as connection:
+            row = connection.execute(query, values).fetchone()
+        return dict(row) if row else None
+
+    def get_draft_job(
+        self, draft_id: int, *, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM draft_jobs WHERE id = ?"
+        values: tuple[Any, ...] = (draft_id,)
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values = (draft_id, user_id)
+        with self._connect() as connection:
+            row = connection.execute(query, values).fetchone()
         return dict(row) if row else None
 
     def create_draft_job(
@@ -528,18 +1244,22 @@ class AssetStore:
         thumb_media_id: str,
         need_open_comment: int,
         only_fans_can_comment: int,
+        user_id: int | None = None,
+        account_id: int | None = None,
     ) -> dict[str, Any]:
         now = _now()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO draft_jobs (
-                    request_id, content_hash, title, author, digest, content,
+                    user_id, account_id, request_id, content_hash, title, author, digest, content,
                     content_source_url, thumb_media_id, need_open_comment,
                     only_fans_can_comment, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
+                    user_id,
+                    account_id,
                     request_id,
                     content_hash,
                     title,
@@ -579,30 +1299,89 @@ class AssetStore:
             )
         return self.get_draft_job(draft_id) or {}
 
-    def list_draft_jobs(self, limit: int = 200) -> list[dict[str, Any]]:
+    def list_draft_jobs(
+        self,
+        limit: int = 200,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         safe_limit = min(max(limit, 1), 1000)
+        safe_offset = max(offset, 0)
+        filters = []
+        values: list[Any] = []
+        if user_id is not None:
+            filters.append("draft_jobs.user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("draft_jobs.account_id = ?")
+            values.append(account_id)
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM draft_jobs ORDER BY updated_at DESC LIMIT ?",
-                (safe_limit,),
+                "SELECT draft_jobs.*, users.username AS owner_username, "
+                "official_accounts.display_name AS account_display_name "
+                "FROM draft_jobs "
+                "LEFT JOIN users ON users.id = draft_jobs.user_id "
+                "LEFT JOIN official_accounts ON official_accounts.id = draft_jobs.account_id"
+                f"{where} ORDER BY draft_jobs.updated_at DESC LIMIT ? OFFSET ?",
+                [*values, safe_limit, safe_offset],
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def overview_counts(self) -> dict[str, int]:
+    def count_draft_jobs(
+        self, *, user_id: int | None = None, account_id: int | None = None
+    ) -> int:
+        filters = []
+        values: list[Any] = []
+        if user_id is not None:
+            filters.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("account_id = ?")
+            values.append(account_id)
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
         with self._connect() as connection:
-            assets = connection.execute("SELECT COUNT(*) AS total FROM assets").fetchone()
+            row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM draft_jobs{where}", values
+            ).fetchone()
+        return int(row["total"]) if row else 0
+
+    def overview_counts(
+        self, *, user_id: int | None = None, account_id: int | None = None
+    ) -> dict[str, int]:
+        filters = []
+        values: list[Any] = []
+        if user_id is not None:
+            filters.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("account_id = ?")
+            values.append(account_id)
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
+        draft_prefix = f"{' AND '.join(filters)} AND " if filters else ""
+        with self._connect() as connection:
+            assets = connection.execute(
+                f"SELECT COUNT(*) AS total FROM assets{where}", values
+            ).fetchone()
             temporary = connection.execute(
-                "SELECT COUNT(*) AS total FROM temporary_assets WHERE expires_at > ?",
-                (_now(),),
+                "SELECT COUNT(*) AS total FROM temporary_assets "
+                + ("WHERE user_id = ? AND " if user_id is not None else "WHERE ")
+                + "expires_at > ?",
+                ([user_id] if user_id is not None else []) + [_now()],
             ).fetchone()
             drafts = connection.execute(
-                "SELECT COUNT(*) AS total FROM draft_jobs WHERE status = 'created'"
+                f"SELECT COUNT(*) AS total FROM draft_jobs WHERE {draft_prefix}status = 'created'",
+                values,
             ).fetchone()
             failures = connection.execute(
-                "SELECT COUNT(*) AS total FROM draft_jobs WHERE status = 'failed'"
+                f"SELECT COUNT(*) AS total FROM draft_jobs WHERE {draft_prefix}status = 'failed'",
+                values,
             ).fetchone()
             unknown = connection.execute(
-                "SELECT COUNT(*) AS total FROM draft_jobs WHERE status = 'unknown'"
+                f"SELECT COUNT(*) AS total FROM draft_jobs WHERE {draft_prefix}status = 'unknown'",
+                values,
             ).fetchone()
         return {
             "assets": int(assets["total"]) if assets else 0,

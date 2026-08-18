@@ -11,74 +11,12 @@ fail() {
 command -v docker >/dev/null 2>&1 || fail "Docker 未安装。请先在宝塔 Docker 页面安装 Docker。"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose 插件不可用。"
 
-random_hex() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 24
-  else
-    tr -d '-' </proc/sys/kernel/random/uuid
-  fi
-}
-
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  generated_password="$(random_hex)"
-  sed -i "s#^ADMIN_PASSWORD=.*#ADMIN_PASSWORD=${generated_password}#" .env
-  echo "已创建 .env，并生成随机管理密码。"
+  echo "已创建空白 .env。"
 fi
 
 chmod 600 .env
-
-admin_password="$(sed -n 's/^ADMIN_PASSWORD=//p' .env | tail -n 1)"
-[[ -n "${admin_password}" ]] || fail ".env 中 ADMIN_PASSWORD 不能为空。"
-[[ "${admin_password}" != replace-with-* ]] || fail "请先修改 .env 中的 ADMIN_PASSWORD。"
-
-temp_api_key="$(sed -n 's/^TEMP_API_KEY=//p' .env | tail -n 1)"
-if [[ -z "${temp_api_key}" || "${temp_api_key}" == replace-with-* ]]; then
-  generated_api_key="$(random_hex)"
-  if grep -q '^TEMP_API_KEY=' .env; then
-    sed -i "s#^TEMP_API_KEY=.*#TEMP_API_KEY=${generated_api_key}#" .env
-  else
-    printf '\nTEMP_API_KEY=%s\n' "${generated_api_key}" >>.env
-  fi
-  echo "已生成临时图片 API Key（仅写入 .env，不在终端显示）。"
-fi
-
-ai_api_key="$(sed -n 's/^AI_API_KEY=//p' .env | tail -n 1)"
-if [[ -z "${ai_api_key}" || "${ai_api_key}" == replace-with-* ]]; then
-  generated_ai_api_key="$(random_hex)"
-  if grep -q '^AI_API_KEY=' .env; then
-    sed -i "s#^AI_API_KEY=.*#AI_API_KEY=${generated_ai_api_key}#" .env
-  else
-    printf '\nAI_API_KEY=%s\n' "${generated_ai_api_key}" >>.env
-  fi
-  echo "已生成微信公众号 AI 上传 API Key（仅写入 .env，不在终端显示）。"
-fi
-
-publish_api_key="$(sed -n 's/^PUBLISH_API_KEY=//p' .env | tail -n 1)"
-if [[ -z "${publish_api_key}" || "${publish_api_key}" == replace-with-* ]]; then
-  generated_publish_api_key="$(random_hex)"
-  if grep -q '^PUBLISH_API_KEY=' .env; then
-    sed -i "s#^PUBLISH_API_KEY=.*#PUBLISH_API_KEY=${generated_publish_api_key}#" .env
-  else
-    printf '\nPUBLISH_API_KEY=%s\n' "${generated_publish_api_key}" >>.env
-  fi
-  echo "已生成微信公众号草稿发布 API Key（仅写入 .env，不在终端显示）。"
-fi
-
-encryption_key="$(sed -n 's/^CREDENTIALS_ENCRYPTION_KEY=//p' .env | tail -n 1)"
-if [[ -z "${encryption_key}" || "${encryption_key}" == replace-with-* ]]; then
-  generated_encryption_key="$(random_hex)"
-  if grep -q '^CREDENTIALS_ENCRYPTION_KEY=' .env; then
-    sed -i "s#^CREDENTIALS_ENCRYPTION_KEY=.*#CREDENTIALS_ENCRYPTION_KEY=${generated_encryption_key}#" .env
-  else
-    printf '\nCREDENTIALS_ENCRYPTION_KEY=%s\n' "${generated_encryption_key}" >>.env
-  fi
-  echo "已生成公众号凭据加密主密钥（仅写入 .env，不在终端显示）。"
-fi
-
-if ! grep -Eq '^WECHAT_APP_ID=wx[0-9A-Za-z]+' .env || ! grep -Eq '^WECHAT_APP_SECRET=.{8,}' .env; then
-  echo "提示：微信 AppID/AppSecret 可在部署后登录控制台配置。"
-fi
 
 echo "开始构建并启动服务..."
 docker compose up -d --build
@@ -86,9 +24,12 @@ docker compose up -d --build
 echo "等待健康检查..."
 for _ in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
-    echo "部署成功：请访问 http://服务器IP:8787"
-    echo "Skill 客户端配置：登录控制台后打开『API 接入』页面即可查看和复制。"
-    echo "命令行备用：bash show-client-config.sh --url http://服务器IP:8787"
+    setup_code="$(docker compose exec -T uploader sh -c 'cat /data/.wechat-setup-token 2>/dev/null || true' | tr -d '\r\n')"
+    echo "部署成功。服务默认只监听服务器本机 127.0.0.1:8787。"
+    if [[ -n "$setup_code" ]]; then
+      echo "一次性初始化码：$setup_code"
+      echo "请通过已配置的 HTTPS 反向代理打开控制台并完成初始化。"
+    fi
     docker compose ps
     exit 0
   fi

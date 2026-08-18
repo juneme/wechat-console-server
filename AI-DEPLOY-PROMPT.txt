@@ -3,7 +3,7 @@
 要求：
 1. 先阅读 INSTALL.zh-CN.md，不要覆盖或删除服务器上的现有网站。
 2. 部署目录固定为 /www/docker/wechat-material-uploader。
-3. 检查并补全 .env 中的 ADMIN_USERNAME、ADMIN_PASSWORD、PUBLIC_BASE_URL、AI_API_KEY、PUBLISH_API_KEY、TEMP_API_KEY 和 CREDENTIALS_ENCRYPTION_KEY；密钥留空时允许 install.sh 自动生成。WECHAT_APP_ID、WECHAT_APP_SECRET 可在部署后通过控制台配置。不要把任何密钥输出到日志或聊天中。
+3. 从 .env.example 创建 .env，允许所有配置保持为空；install.sh 会在私密终端输出一次性初始化码，用户用它完成首次初始化。不要把初始化码或任何密钥输出到聊天和最终报告中。初始化后可在网页添加和切换多个公众号，登录页开放普通用户自行注册。
 4. 执行：cd /www/docker/wechat-material-uploader && bash install.sh
 5. 验证：docker compose ps；curl -fsS http://127.0.0.1:8787/healthz
 6. 在宝塔中新建独立站点，把域名 HTTPS 反向代理到 http://127.0.0.1:8787，请求体限制至少 32m，超时至少 120 秒。

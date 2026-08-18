@@ -45,6 +45,27 @@ read_env() {
   sed -n "s/^$1=//p" .env | tail -n 1 | tr -d '\r'
 }
 
+read_database_key() {
+  local column="$1"
+  docker compose exec -T uploader python - "$column" <<'PY'
+import sys
+
+from app.config import get_settings
+from app.credentials import CredentialCipher
+from app.database import AssetStore
+
+settings = get_settings()
+store = AssetStore(settings.database_path)
+row = store.get_service_credentials()
+if row:
+    cipher = CredentialCipher.create(
+        secret=settings.credentials_encryption_key,
+        key_path=settings.database_path.parent / ".wechat-credentials.key",
+    )
+    print(cipher.decrypt(row[sys.argv[1]]))
+PY
+}
+
 if [[ -z "$console_url" ]]; then
   console_url="$(read_env PUBLIC_BASE_URL)"
 fi
@@ -56,6 +77,18 @@ console_url="${console_url%/}"
 
 image_key="$(read_env AI_API_KEY)"
 publish_key="$(read_env PUBLISH_API_KEY)"
+if [[ -z "$image_key" || -z "$publish_key" ]]; then
+  command -v docker >/dev/null 2>&1 || {
+    echo "ERROR: Docker is required to read initialized database keys" >&2
+    exit 1
+  }
+  docker compose version >/dev/null 2>&1 || {
+    echo "ERROR: Docker Compose plugin is unavailable" >&2
+    exit 1
+  }
+  [[ -n "$image_key" ]] || image_key="$(read_database_key ai_api_key_ciphertext)"
+  [[ -n "$publish_key" ]] || publish_key="$(read_database_key publish_api_key_ciphertext)"
+fi
 [[ -n "$image_key" ]] || { echo "ERROR: AI_API_KEY is not configured" >&2; exit 1; }
 [[ -n "$publish_key" ]] || { echo "ERROR: PUBLISH_API_KEY is not configured" >&2; exit 1; }
 

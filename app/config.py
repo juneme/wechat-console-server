@@ -33,8 +33,11 @@ class Settings:
     temp_storage_path: Path
     temp_max_bytes: int
     temp_storage_max_bytes: int
+    temp_user_storage_max_bytes: int
     temp_retention_days: int
     temp_cleanup_interval_seconds: int
+    max_users: int
+    max_accounts_per_user: int
     credentials_encryption_key: str
     publish_api_key: str
 
@@ -55,14 +58,7 @@ class Settings:
         return bool(self.publish_api_key)
 
     def validate_runtime(self) -> None:
-        missing = []
-        if not self.admin_password:
-            missing.append("ADMIN_PASSWORD")
-        if missing:
-            raise RuntimeError(
-                f"Missing required environment variables: {', '.join(missing)}"
-            )
-        if len(self.admin_password) < 12:
+        if self.admin_password and len(self.admin_password) < 12:
             raise RuntimeError("ADMIN_PASSWORD must contain at least 12 characters")
         if self.admin_password.startswith("replace-with-"):
             raise RuntimeError("ADMIN_PASSWORD must not use the example placeholder")
@@ -97,6 +93,9 @@ class Settings:
             "ARTICLE_MAX_DIMENSION": self.article_max_dimension,
             "TEMP_MAX_BYTES": self.temp_max_bytes,
             "TEMP_STORAGE_MAX_BYTES": self.temp_storage_max_bytes,
+            "TEMP_USER_STORAGE_MAX_BYTES": self.temp_user_storage_max_bytes,
+            "MAX_USERS": self.max_users,
+            "MAX_ACCOUNTS_PER_USER": self.max_accounts_per_user,
         }
         invalid = [name for name, value in positive_values.items() if value < 1]
         if invalid:
@@ -112,7 +111,7 @@ def get_settings() -> Settings:
     return Settings(
         wechat_app_id=os.getenv("WECHAT_APP_ID", "").strip(),
         wechat_app_secret=os.getenv("WECHAT_APP_SECRET", "").strip(),
-        admin_username=os.getenv("ADMIN_USERNAME", "admin").strip() or "admin",
+        admin_username=os.getenv("ADMIN_USERNAME", "").strip(),
         admin_password=os.getenv("ADMIN_PASSWORD", ""),
         database_path=Path(os.getenv("DATABASE_PATH", "/data/uploader.sqlite3")),
         max_source_bytes=_int_env("MAX_SOURCE_BYTES", 30_000_000),
@@ -125,8 +124,13 @@ def get_settings() -> Settings:
         temp_storage_path=Path(os.getenv("TEMP_STORAGE_PATH", "/data/temp-images")),
         temp_max_bytes=_int_env("TEMP_MAX_BYTES", 1_000_000),
         temp_storage_max_bytes=_int_env("TEMP_STORAGE_MAX_BYTES", 5_000_000_000),
+        temp_user_storage_max_bytes=_int_env(
+            "TEMP_USER_STORAGE_MAX_BYTES", 500_000_000
+        ),
         temp_retention_days=_int_env("TEMP_RETENTION_DAYS", 30),
         temp_cleanup_interval_seconds=_int_env("TEMP_CLEANUP_INTERVAL_SECONDS", 3600),
+        max_users=_int_env("MAX_USERS", 100),
+        max_accounts_per_user=_int_env("MAX_ACCOUNTS_PER_USER", 20),
         credentials_encryption_key=os.getenv(
             "CREDENTIALS_ENCRYPTION_KEY", ""
         ).strip(),

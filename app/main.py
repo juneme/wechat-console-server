@@ -10,6 +10,7 @@ import sqlite3
 import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -45,6 +46,7 @@ from .image_tools import (
     prepare_article_image,
     prepare_temporary_image,
 )
+from .passwords import hash_password, verify_password
 from .wechat import WechatAPIError, WechatClient
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,13 +58,34 @@ LOGIN_IP_FAILURE_LIMIT = 10
 LOGIN_IP_WINDOW_SECONDS = 5 * 60
 LOGIN_ACCOUNT_FAILURE_LIMIT = 20
 LOGIN_ACCOUNT_WINDOW_SECONDS = 15 * 60
+REGISTRATION_IP_LIMIT = 5
+REGISTRATION_GLOBAL_LIMIT = 50
+REGISTRATION_WINDOW_SECONDS = 60 * 60
+SETUP_TOKEN_FILENAME = ".wechat-setup-token"
 _login_failure_buckets: dict[str, deque[float]] = {}
+_registration_buckets: dict[str, deque[float]] = {}
 _login_failure_lock = Lock()
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=256)
+
+
+class InitialSetupRequest(BaseModel):
+    setup_token: str = Field(min_length=16, max_length=256)
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class RegistrationRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
 
 
 class DeleteAssetItem(BaseModel):
@@ -93,8 +116,8 @@ class DraftArticleRequest(BaseModel):
     only_fans_can_comment: Literal[0, 1] = 0
 
 
-def _settings() -> Settings:
-    return get_settings()
+def _settings(request: Request) -> Settings:
+    return request.app.state.settings
 
 
 def _login_rate_keys(request: Request, username: str) -> tuple[str, str]:
@@ -152,9 +175,51 @@ def _clear_login_failures(request: Request, username: str) -> None:
             _login_failure_buckets.pop(key, None)
 
 
+def _consume_registration_attempt(request: Request) -> None:
+    now = time.monotonic()
+    client_host = request.client.host if request.client else "unknown"
+    limits = (
+        ("global", REGISTRATION_GLOBAL_LIMIT),
+        (f"ip:{client_host}", REGISTRATION_IP_LIMIT),
+    )
+    with _login_failure_lock:
+        for key, limit in limits:
+            bucket = _registration_buckets.setdefault(key, deque())
+            _prune_login_bucket(bucket, now - REGISTRATION_WINDOW_SECONDS)
+            if len(bucket) >= limit:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="注册请求过于频繁，请稍后再试",
+                    headers={"Retry-After": str(REGISTRATION_WINDOW_SECONDS)},
+                )
+        for key, _ in limits:
+            _registration_buckets[key].append(now)
+
+
+def _load_or_create_setup_token(database_path: Path) -> str:
+    token_path = database_path.parent / SETUP_TOKEN_FILENAME
+    try:
+        existing = token_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        existing = ""
+    if len(existing) >= 16:
+        return existing
+    token = secrets.token_urlsafe(24)
+    token_path.write_text(token + "\n", encoding="utf-8")
+    token_path.chmod(0o600)
+    return token
+
+
+def _clear_setup_token(app: FastAPI) -> None:
+    app.state.setup_token = None
+    token_path = app.state.settings.database_path.parent / SETUP_TOKEN_FILENAME
+    with suppress(FileNotFoundError, OSError):
+        token_path.unlink()
+
+
 def _require_auth(
     request: Request,
-) -> str:
+) -> dict:
     token = request.cookies.get(SESSION_COOKIE, "")
     session = None
     if token:
@@ -166,7 +231,47 @@ def _require_auth(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="请先登录",
         )
-    return str(session["username"])
+    user_id = session.get("user_id")
+    store: AssetStore = request.app.state.store
+    user = store.get_user_by_id(int(user_id)) if user_id is not None else None
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已失效")
+    request.state.current_user = user
+    return user
+
+
+def _require_admin(
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    return user
+
+
+def _create_admin_session(
+    request: Request, response: Response, *, user: dict
+) -> None:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = (
+        datetime.now(UTC) + timedelta(seconds=SESSION_MAX_AGE_SECONDS)
+    ).isoformat(timespec="seconds")
+    store: AssetStore = request.app.state.store
+    store.create_admin_session(
+        token_hash=token_hash,
+        user_id=int(user["id"]),
+        username=str(user["username"]),
+        expires_at=expires_at,
+    )
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/",
+    )
 
 
 def _require_ajax(request: Request) -> None:
@@ -180,6 +285,7 @@ def _require_ajax(request: Request) -> None:
 
 
 def _require_temp_api_key(
+    request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(bearer_security)
     ],
@@ -198,6 +304,10 @@ def _require_temp_api_key(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    admin = request.app.state.store.get_admin_user()
+    if admin is None:
+        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
+    request.state.api_user_id = int(admin["id"])
     return "temp-api"
 
 
@@ -222,10 +332,15 @@ def _require_ai_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
     request.state.api_key_verified = True
+    admin = request.app.state.store.get_admin_user()
+    if admin is None:
+        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
+    request.state.api_user_id = int(admin["id"])
     return "ai-api"
 
 
 def _require_publish_api_key(
+    request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(bearer_security)
     ],
@@ -244,6 +359,10 @@ def _require_publish_api_key(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    admin = request.app.state.store.get_admin_user()
+    if admin is None:
+        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
+    request.state.api_user_id = int(admin["id"])
     return "publish-api"
 
 
@@ -363,11 +482,12 @@ def _cleanup_expired_temporary_assets(store: AssetStore, storage_path: Path) -> 
 async def _temporary_cleanup_loop(app: FastAPI) -> None:
     settings: Settings = app.state.settings
     while True:
-        await asyncio.to_thread(
-            _cleanup_expired_temporary_assets,
-            app.state.store,
-            settings.temp_storage_path,
-        )
+        async with app.state.temporary_storage_lock:
+            await asyncio.to_thread(
+                _cleanup_expired_temporary_assets,
+                app.state.store,
+                settings.temp_storage_path,
+            )
         await asyncio.sleep(settings.temp_cleanup_interval_seconds)
 
 
@@ -389,75 +509,183 @@ async def _store_temporary_image(
     extension = Path(prepared.filename).suffix.lower() or ".jpg"
     stored_name = f"{token}{extension}"
     store: AssetStore = request.app.state.store
-    used_bytes = await asyncio.to_thread(store.temporary_storage_bytes)
-    if used_bytes + len(prepared.data) > settings.temp_storage_max_bytes:
-        raise ImageValidationError("服务器临时图片存储空间已达到上限，请先删除旧图片")
-    storage_path = settings.temp_storage_path
-    storage_path.mkdir(parents=True, exist_ok=True)
-    target = storage_path / stored_name
-    await asyncio.to_thread(target.write_bytes, prepared.data)
-    expires_at = (
-        datetime.now(UTC) + timedelta(days=settings.temp_retention_days)
-    ).isoformat(timespec="seconds")
-    try:
-        row = store.create_temporary_asset(
-            token=token,
-            sha256=hashlib.sha256(data).hexdigest(),
-            filename=filename,
-            stored_name=stored_name,
-            content_type=prepared.content_type,
-            original_bytes=len(data),
-            processed_bytes=len(prepared.data),
-            width=prepared.width,
-            height=prepared.height,
-            expires_at=expires_at,
+    user_id = _request_user_id(request)
+    async with request.app.state.temporary_storage_lock:
+        used_bytes = await asyncio.to_thread(store.temporary_storage_bytes)
+        if used_bytes + len(prepared.data) > settings.temp_storage_max_bytes:
+            raise ImageValidationError("服务器临时图片存储空间已达到上限，请先删除旧图片")
+        user_used_bytes = await asyncio.to_thread(
+            store.temporary_storage_bytes, user_id=user_id
         )
-    except Exception:
-        with suppress(FileNotFoundError, OSError):
-            target.unlink()
-        raise
+        if user_used_bytes + len(prepared.data) > (
+            settings.temp_user_storage_max_bytes
+        ):
+            raise ImageValidationError("当前用户临时图片存储空间已达到上限，请先删除旧图片")
+        storage_path = settings.temp_storage_path
+        storage_path.mkdir(parents=True, exist_ok=True)
+        target = storage_path / stored_name
+        await asyncio.to_thread(target.write_bytes, prepared.data)
+        expires_at = (
+            datetime.now(UTC) + timedelta(days=settings.temp_retention_days)
+        ).isoformat(timespec="seconds")
+        try:
+            row = store.create_temporary_asset(
+                user_id=user_id,
+                token=token,
+                sha256=hashlib.sha256(data).hexdigest(),
+                filename=filename,
+                stored_name=stored_name,
+                content_type=prepared.content_type,
+                original_bytes=len(data),
+                processed_bytes=len(prepared.data),
+                width=prepared.width,
+                height=prepared.height,
+                expires_at=expires_at,
+            )
+        except Exception:
+            with suppress(FileNotFoundError, OSError):
+                target.unlink()
+            raise
     return _public_temporary_asset(row, request, settings)
 
 
-def _require_wechat_config(request: Request) -> WechatClient:
-    config_error = getattr(request.app.state, "wechat_config_error", None)
-    if config_error:
-        raise HTTPException(status_code=503, detail=config_error)
-    client: WechatClient = request.app.state.wechat
-    if isinstance(client, WechatClient) and (not client.app_id or not client.app_secret):
+def _request_user_id(request: Request) -> int:
+    user = getattr(request.state, "current_user", None)
+    if user:
+        return int(user["id"])
+    api_user_id = getattr(request.state, "api_user_id", None)
+    if api_user_id is not None:
+        return int(api_user_id)
+    raise HTTPException(status_code=401, detail="无法确定当前用户")
+
+
+def _request_account(request: Request, *, required: bool = False) -> dict | None:
+    store: AssetStore = request.app.state.store
+    user_id = _request_user_id(request)
+    header = request.headers.get("X-Wechat-Account-ID", "").strip()
+    if header:
+        try:
+            account_id = int(header)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="公众号 ID 格式不正确") from exc
+        row = store.get_official_account(account_id, user_id=user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="公众号不存在")
+    else:
+        row = store.get_active_official_account(user_id)
+    if row is None and required:
         raise HTTPException(
             status_code=503,
             detail="微信 AppID/AppSecret 尚未配置，请先在公众号设置中完成配置",
         )
+    return row
+
+
+def _wechat_client_for_account(request: Request, row: dict) -> WechatClient:
+    override = getattr(request.app.state, "wechat", None)
+    if override is not None:
+        return override
+    account_id = int(row["id"])
+    cache: dict[int, tuple[str, WechatClient]] = request.app.state.wechat_clients
+    cached = cache.get(account_id)
+    if cached and cached[0] == row["updated_at"]:
+        return cached[1]
+    cipher: CredentialCipher = request.app.state.credential_cipher
+    try:
+        app_secret = cipher.decrypt(row["app_secret_ciphertext"])
+    except CredentialError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    client = WechatClient(row["app_id"], app_secret, request.app.state.http)
+    cache[account_id] = (row["updated_at"], client)
     return client
 
 
-def _set_wechat_client(
-    app: FastAPI, *, app_id: str, app_secret: str, source: str
-) -> None:
-    app.state.wechat = WechatClient(app_id, app_secret, app.state.http)
-    app.state.wechat_source = source
-    app.state.wechat_config_error = None
+def _require_wechat_config(request: Request) -> WechatClient:
+    row = _request_account(request, required=True)
+    assert row is not None
+    return _wechat_client_for_account(request, row)
 
 
-def _public_account(request: Request) -> dict:
-    store: AssetStore = request.app.state.store
-    row = store.get_wechat_account()
-    client: WechatClient = request.app.state.wechat
+def _public_account(request: Request, row: dict | None = None) -> dict:
+    row = row if row is not None else _request_account(request)
+    config_error = None
+    if row:
+        try:
+            request.app.state.credential_cipher.decrypt(row["app_secret_ciphertext"])
+        except CredentialError as exc:
+            config_error = str(exc)
     return {
+        "id": row.get("id") if row else None,
         "display_name": row.get("display_name", "未命名公众号") if row else "未命名公众号",
         "account_type": row.get("account_type", "subscription") if row else "subscription",
-        "app_id": client.app_id,
-        "app_id_suffix": client.app_id[-6:] if client.app_id else "",
-        "secret_configured": bool(client.app_secret),
-        "source": getattr(request.app.state, "wechat_source", "none"),
+        "app_id": row.get("app_id", "") if row else "",
+        "app_id_suffix": row["app_id"][-6:] if row and row.get("app_id") else "",
+        "secret_configured": bool(row and row.get("app_secret_ciphertext")),
+        "source": "console" if row else "none",
         "updated_at": row.get("updated_at") if row else None,
         "encryption": request.app.state.credential_cipher.source,
-        "config_error": getattr(request.app.state, "wechat_config_error", None),
+        "config_error": config_error,
     }
 
 
-def _public_draft(row: dict, *, include_content: bool = False) -> dict:
+def _save_official_account(
+    payload: WechatAccountUpdate,
+    request: Request,
+    user: dict,
+    *,
+    account_id: int | None = None,
+) -> dict:
+    display_name = payload.display_name.strip()
+    app_id = payload.app_id.strip()
+    supplied_secret = (payload.app_secret or "").strip()
+    if not display_name or not app_id:
+        raise HTTPException(status_code=422, detail="公众号名称和 AppID 不能为空")
+    if supplied_secret and len(supplied_secret) < 8:
+        raise HTTPException(status_code=422, detail="AppSecret 格式不正确")
+    store: AssetStore = request.app.state.store
+    user_id = int(user["id"])
+    current = (
+        store.get_official_account(account_id, user_id=user_id)
+        if account_id is not None
+        else None
+    )
+    if account_id is not None and current is None:
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    if supplied_secret:
+        ciphertext = request.app.state.credential_cipher.encrypt(supplied_secret)
+    elif current:
+        ciphertext = current["app_secret_ciphertext"]
+    else:
+        raise HTTPException(status_code=422, detail="首次保存时必须填写 AppSecret")
+    if current:
+        saved = store.update_official_account(
+            account_id,
+            user_id=user_id,
+            display_name=display_name,
+            account_type=payload.account_type,
+            app_id=app_id,
+            app_secret_ciphertext=ciphertext,
+        )
+    else:
+        saved = store.create_official_account(
+            user_id=user_id,
+            display_name=display_name,
+            account_type=payload.account_type,
+            app_id=app_id,
+            app_secret_ciphertext=ciphertext,
+        )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="该 AppID 已存在")
+    request.app.state.wechat_clients.pop(int(saved["id"]), None)
+    return saved
+
+
+def _public_draft(
+    row: dict,
+    *,
+    include_content: bool = False,
+    current_user_id: int | None = None,
+) -> dict:
     result = {
         key: row.get(key)
         for key in (
@@ -473,9 +701,15 @@ def _public_draft(row: dict, *, include_content: bool = False) -> dict:
             "last_error",
             "created_at",
             "updated_at",
+            "owner_username",
+            "account_display_name",
         )
     }
     result["content_characters"] = len(row.get("content") or "")
+    result["can_delete"] = (
+        current_user_id is not None
+        and int(row.get("user_id") or 0) == current_user_id
+    )
     if include_content:
         result["content"] = row.get("content") or ""
     return result
@@ -488,6 +722,28 @@ async def lifespan(app: FastAPI):
     store = AssetStore(settings.database_path)
     store.initialize()
     store.delete_expired_admin_sessions()
+    cipher = CredentialCipher.create(
+        secret=settings.credentials_encryption_key,
+        key_path=settings.database_path.parent / ".wechat-credentials.key",
+    )
+    if store.get_admin_credentials() is None and settings.admin_password:
+        password_hash = await asyncio.to_thread(
+            hash_password, settings.admin_password
+        )
+        store.initialize_admin_credentials(
+            settings.admin_username or "admin", password_hash
+        )
+    service_credentials = store.get_service_credentials()
+    if service_credentials:
+        settings = replace(
+            settings,
+            ai_api_key=settings.ai_api_key
+            or cipher.decrypt(service_credentials["ai_api_key_ciphertext"]),
+            publish_api_key=settings.publish_api_key
+            or cipher.decrypt(service_credentials["publish_api_key_ciphertext"]),
+            temp_api_key=settings.temp_api_key
+            or cipher.decrypt(service_credentials["temp_api_key_ciphertext"]),
+        )
     settings.temp_storage_path.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(
         _cleanup_expired_temporary_assets, store, settings.temp_storage_path
@@ -496,32 +752,26 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.settings = settings
     app.state.http = http
-    cipher = CredentialCipher.create(
-        secret=settings.credentials_encryption_key,
-        key_path=settings.database_path.parent / ".wechat-credentials.key",
-    )
     app.state.credential_cipher = cipher
-    account = store.get_wechat_account()
-    if account:
-        try:
-            app_secret = cipher.decrypt(account["app_secret_ciphertext"])
-            _set_wechat_client(
-                app,
-                app_id=account["app_id"],
-                app_secret=app_secret,
-                source="console",
-            )
-        except CredentialError as exc:
-            app.state.wechat = WechatClient("", "", http)
-            app.state.wechat_source = "console"
-            app.state.wechat_config_error = str(exc)
+    app.state.temporary_storage_lock = asyncio.Lock()
+    if store.get_admin_credentials() is None:
+        app.state.setup_token = _load_or_create_setup_token(settings.database_path)
     else:
-        _set_wechat_client(
-            app,
+        app.state.setup_token = None
+        stale_token_path = settings.database_path.parent / SETUP_TOKEN_FILENAME
+        with suppress(FileNotFoundError, OSError):
+            stale_token_path.unlink()
+    admin = store.get_admin_user()
+    if admin and not store.list_official_accounts(int(admin["id"])) and settings.wechat_configured:
+        store.create_official_account(
+            user_id=int(admin["id"]),
+            display_name="环境配置公众号",
+            account_type="subscription",
             app_id=settings.wechat_app_id,
-            app_secret=settings.wechat_app_secret,
-            source="environment" if settings.wechat_configured else "none",
+            app_secret_ciphertext=cipher.encrypt(settings.wechat_app_secret),
         )
+    app.state.wechat = None
+    app.state.wechat_clients = {}
     cleanup_task = asyncio.create_task(_temporary_cleanup_loop(app))
     try:
         yield
@@ -552,62 +802,138 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/setup/status")
+async def setup_status(request: Request, response: Response) -> dict[str, bool]:
+    response.headers["Cache-Control"] = "no-store"
+    store: AssetStore = request.app.state.store
+    configured = store.get_admin_credentials() is not None
+    return {"configured": configured, "requires_token": not configured}
+
+
+@app.post("/api/setup")
+async def initial_setup(
+    payload: InitialSetupRequest,
+    request: Request,
+    response: Response,
+) -> dict:
+    _require_ajax(request)
+    store: AssetStore = request.app.state.store
+    if store.get_admin_credentials() is not None:
+        raise HTTPException(status_code=409, detail="控制台已经完成初始化")
+    expected_token = request.app.state.setup_token
+    supplied_token = payload.setup_token.strip()
+    if not expected_token or not secrets.compare_digest(
+        supplied_token, expected_token
+    ):
+        raise HTTPException(status_code=403, detail="初始化码不正确")
+    username = payload.username.strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="管理员账号不能为空")
+    if payload.password.startswith("replace-with-"):
+        raise HTTPException(status_code=422, detail="不能使用示例占位密码")
+
+    password_hash = await asyncio.to_thread(hash_password, payload.password)
+    service_keys = {
+        "ai_api_key": secrets.token_urlsafe(32),
+        "publish_api_key": secrets.token_urlsafe(32),
+        "temp_api_key": secrets.token_urlsafe(32),
+    }
+    cipher: CredentialCipher = request.app.state.credential_cipher
+    created = store.initialize_console_credentials(
+        username=username,
+        password_hash=password_hash,
+        ai_api_key_ciphertext=cipher.encrypt(service_keys["ai_api_key"]),
+        publish_api_key_ciphertext=cipher.encrypt(service_keys["publish_api_key"]),
+        temp_api_key_ciphertext=cipher.encrypt(service_keys["temp_api_key"]),
+    )
+    if not created:
+        raise HTTPException(status_code=409, detail="控制台已经完成初始化")
+
+    request.app.state.settings = replace(
+        request.app.state.settings,
+        **service_keys,
+    )
+    user = store.get_user_by_username(username)
+    if user is None:
+        raise HTTPException(status_code=500, detail="管理员初始化失败")
+    _create_admin_session(request, response, user=user)
+    _clear_setup_token(request.app)
+    return {
+        "configured": True,
+        "user": {"username": user["username"], "role": user["role"]},
+    }
+
+
+@app.post("/api/auth/register")
+async def register(
+    payload: RegistrationRequest,
+    request: Request,
+    response: Response,
+) -> dict:
+    _require_ajax(request)
+    store: AssetStore = request.app.state.store
+    if store.get_admin_user() is None:
+        raise HTTPException(status_code=409, detail="请先完成控制台初始化")
+    username = payload.username.strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="用户名不能为空")
+    if payload.password.startswith("replace-with-"):
+        raise HTTPException(status_code=422, detail="不能使用示例占位密码")
+    _consume_registration_attempt(request)
+    if store.count_users() >= request.app.state.settings.max_users:
+        raise HTTPException(status_code=403, detail="用户数量已达到服务器上限")
+    password_hash = await asyncio.to_thread(hash_password, payload.password)
+    user = store.create_user(
+        username=username,
+        password_hash=password_hash,
+        max_users=request.app.state.settings.max_users,
+    )
+    if user is None:
+        if store.count_users() >= request.app.state.settings.max_users:
+            raise HTTPException(status_code=403, detail="用户数量已达到服务器上限")
+        raise HTTPException(status_code=409, detail="用户名已被注册")
+    _create_admin_session(request, response, user=user)
+    return {"user": {"username": user["username"], "role": user["role"]}}
+
+
 @app.post("/api/auth/login")
 async def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
-    settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
-    username_valid = secrets.compare_digest(
-        payload.username.encode("utf-8"), settings.admin_username.encode("utf-8")
-    )
-    password_valid = secrets.compare_digest(
-        payload.password.encode("utf-8"), settings.admin_password.encode("utf-8")
-    )
-    rate_username = settings.admin_username if username_valid else "<invalid>"
+    store: AssetStore = request.app.state.store
+    if store.get_admin_user() is None:
+        raise HTTPException(status_code=409, detail="请先完成控制台初始化")
+    user = store.get_user_by_username(payload.username.strip())
+    rate_username = str(user["username"]) if user else "<invalid>"
     _enforce_login_rate_limit(request, rate_username)
-    if not (username_valid and password_valid):
+    verification_user = user or store.get_admin_user()
+    password_valid = await asyncio.to_thread(
+        verify_password, str(verification_user["password_hash"]), payload.password
+    )
+    if user is None or not password_valid:
         _record_login_failure(request, rate_username)
         raise HTTPException(status_code=401, detail="用户名或密码不正确")
     _clear_login_failures(request, rate_username)
 
-    token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires_at = (
-        datetime.now(UTC) + timedelta(seconds=SESSION_MAX_AGE_SECONDS)
-    ).isoformat(timespec="seconds")
-    store: AssetStore = request.app.state.store
-    store.create_admin_session(
-        token_hash=token_hash,
-        username=settings.admin_username,
-        expires_at=expires_at,
-    )
-    response.set_cookie(
-        key=SESSION_COOKIE,
-        value=token,
-        max_age=SESSION_MAX_AGE_SECONDS,
-        httponly=True,
-        secure=request.url.scheme == "https",
-        samesite="lax",
-        path="/",
-    )
-    return {"user": {"username": settings.admin_username}}
+    _create_admin_session(request, response, user=user)
+    return {"user": {"username": user["username"], "role": user["role"]}}
 
 
 @app.get("/api/auth/me")
 async def current_user(
-    username: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
 ) -> dict:
-    return {"user": {"username": username}}
+    return {"user": {"username": user["username"], "role": user["role"]}}
 
 
 @app.post("/api/auth/logout")
 async def logout(
     request: Request,
     response: Response,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
 ) -> dict[str, bool]:
     _require_ajax(request)
     token = request.cookies.get(SESSION_COOKIE, "")
@@ -619,10 +945,42 @@ async def logout(
     return {"logged_out": True}
 
 
+@app.post("/api/auth/password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict[str, int | bool]:
+    _require_ajax(request)
+    if payload.new_password.startswith("replace-with-"):
+        raise HTTPException(status_code=422, detail="不能使用示例占位密码")
+    store: AssetStore = request.app.state.store
+    username = str(user["username"])
+    _enforce_login_rate_limit(request, username)
+    current_valid = await asyncio.to_thread(
+        verify_password, str(user["password_hash"]), payload.current_password
+    )
+    if not current_valid:
+        _record_login_failure(request, username)
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    _clear_login_failures(request, username)
+    if secrets.compare_digest(
+        payload.current_password.encode("utf-8"),
+        payload.new_password.encode("utf-8"),
+    ):
+        raise HTTPException(status_code=422, detail="新密码不能与当前密码相同")
+
+    password_hash = await asyncio.to_thread(hash_password, payload.new_password)
+    revoked = store.change_user_password_hash(int(user["id"]), password_hash)
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="lax")
+    return {"password_changed": True, "sessions_revoked": revoked}
+
+
 @app.get("/api/status")
 async def api_status(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     account = _public_account(request)
@@ -648,7 +1006,7 @@ async def api_status(
 async def skill_client_config(
     request: Request,
     response: Response,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_admin)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
@@ -669,73 +1027,137 @@ async def skill_client_config(
 @app.get("/api/account")
 async def get_account(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
 ) -> dict:
     return {"account": _public_account(request)}
+
+
+@app.get("/api/accounts")
+async def list_accounts(
+    request: Request,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    store: AssetStore = request.app.state.store
+    user_id = int(user["id"])
+    refreshed = store.get_user_by_id(user_id) or user
+    items = [
+        _public_account(request, row)
+        for row in store.list_official_accounts(user_id)
+    ]
+    return {
+        "items": items,
+        "count": len(items),
+        "active_account_id": refreshed.get("active_account_id"),
+    }
+
+
+@app.post("/api/accounts", status_code=status.HTTP_201_CREATED)
+async def create_account(
+    payload: WechatAccountUpdate,
+    request: Request,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    _require_ajax(request)
+    store: AssetStore = request.app.state.store
+    if len(store.list_official_accounts(int(user["id"]))) >= (
+        request.app.state.settings.max_accounts_per_user
+    ):
+        raise HTTPException(status_code=403, detail="公众号数量已达到当前用户上限")
+    saved = _save_official_account(payload, request, user)
+    store.set_active_official_account(int(user["id"]), int(saved["id"]))
+    return {"account": _public_account(request, saved)}
+
+
+@app.put("/api/accounts/{account_id}")
+async def update_official_account(
+    account_id: int,
+    payload: WechatAccountUpdate,
+    request: Request,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    _require_ajax(request)
+    saved = _save_official_account(
+        payload, request, user, account_id=account_id
+    )
+    return {"account": _public_account(request, saved)}
+
+
+@app.post("/api/accounts/{account_id}/activate")
+async def activate_official_account(
+    account_id: int,
+    request: Request,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    _require_ajax(request)
+    store: AssetStore = request.app.state.store
+    if not store.set_active_official_account(int(user["id"]), account_id):
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    row = store.get_official_account(account_id, user_id=int(user["id"]))
+    return {"account": _public_account(request, row)}
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_official_account(
+    account_id: int,
+    request: Request,
+    user: Annotated[dict, Depends(_require_auth)],
+) -> dict[str, bool]:
+    _require_ajax(request)
+    store: AssetStore = request.app.state.store
+    if not store.delete_official_account(account_id, user_id=int(user["id"])):
+        raise HTTPException(status_code=404, detail="公众号不存在")
+    request.app.state.wechat_clients.pop(account_id, None)
+    return {"deleted": True}
 
 
 @app.put("/api/account")
 async def update_account(
     payload: WechatAccountUpdate,
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
 ) -> dict:
     _require_ajax(request)
-    display_name = payload.display_name.strip()
-    app_id = payload.app_id.strip()
-    supplied_secret = (payload.app_secret or "").strip()
-    if not display_name or not app_id:
-        raise HTTPException(status_code=422, detail="公众号名称和 AppID 不能为空")
-    if supplied_secret and len(supplied_secret) < 8:
-        raise HTTPException(status_code=422, detail="AppSecret 格式不正确")
-
     store: AssetStore = request.app.state.store
-    current = store.get_wechat_account()
-    client: WechatClient = request.app.state.wechat
-    app_secret = supplied_secret or client.app_secret
-    if not app_secret:
-        raise HTTPException(status_code=422, detail="首次保存时必须填写 AppSecret")
-
-    cipher: CredentialCipher = request.app.state.credential_cipher
-    ciphertext = (
-        cipher.encrypt(app_secret)
-        if supplied_secret or not current
-        else current["app_secret_ciphertext"]
+    current = store.get_active_official_account(int(user["id"]))
+    saved = _save_official_account(
+        payload,
+        request,
+        user,
+        account_id=int(current["id"]) if current else None,
     )
-    store.upsert_wechat_account(
-        display_name=display_name,
-        account_type=payload.account_type,
-        app_id=app_id,
-        app_secret_ciphertext=ciphertext,
-    )
-    _set_wechat_client(
-        request.app,
-        app_id=app_id,
-        app_secret=app_secret,
-        source="console",
-    )
-    return {"account": _public_account(request)}
+    store.set_active_official_account(int(user["id"]), int(saved["id"]))
+    return {"account": _public_account(request, saved)}
 
 
 @app.get("/api/overview")
 async def overview(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     store: AssetStore = request.app.state.store
-    counts = store.overview_counts()
+    account = _request_account(request)
+    account_id = int(account["id"]) if account else None
+    user_id = int(user["id"])
+    counts = store.overview_counts(user_id=user_id, account_id=account_id)
+    draft_filters = {"user_id": user_id, "account_id": account_id}
+    if user["role"] == "admin":
+        global_counts = store.overview_counts()
+        for key in ("drafts", "failed_drafts", "unknown_drafts"):
+            counts[key] = global_counts[key]
+        draft_filters = {}
     return {
-        "account": _public_account(request),
+        "account": _public_account(request, account),
         "counts": counts,
         "apis": {
-            "wechat": bool(request.app.state.wechat.app_id and request.app.state.wechat.app_secret),
+            "wechat": bool(account and account.get("app_secret_ciphertext")),
             "images": settings.ai_api_configured,
             "drafts": settings.publish_api_configured,
             "temporary": settings.temp_api_configured,
         },
         "recent_drafts": [
-            _public_draft(row) for row in store.list_draft_jobs(limit=5)
+            _public_draft(row, current_user_id=user_id)
+            for row in store.list_draft_jobs(limit=5, **draft_filters)
         ],
     }
 
@@ -744,7 +1166,7 @@ async def overview(
 @app.post("/api/test-connection")
 async def test_connection(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
 ) -> dict[str, bool]:
     _require_ajax(request)
     client = _require_wechat_config(request)
@@ -758,7 +1180,7 @@ async def test_connection(
 @app.post("/api/diagnostics/run")
 async def run_diagnostics(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
@@ -799,7 +1221,7 @@ async def run_diagnostics(
         wechat_status = "warning"
     else:
         try:
-            await request.app.state.wechat.get_token()
+            await _require_wechat_config(request).get_token()
             wechat_ok = True
             wechat_detail = f"连接成功 · AppID 尾号 {account['app_id_suffix']}"
             wechat_status = "ok"
@@ -852,12 +1274,15 @@ async def run_diagnostics(
 @app.post("/api/upload")
 async def upload_image(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
     mode: Annotated[Literal["article", "material", "both", "temporary"], Form()],
     image: Annotated[UploadFile, File()],
 ) -> dict:
     _require_ajax(request)
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=mode != "temporary")
+    account_id = int(account["id"]) if account else None
     if mode != "temporary":
         _require_wechat_config(request)
     filename = _safe_upload_filename(image.filename)
@@ -908,8 +1333,12 @@ async def upload_image(
 
     sha256 = hashlib.sha256(data).hexdigest()
     store: AssetStore = request.app.state.store
-    existing = store.get_by_hash(sha256)
+    existing = store.get_by_hash(
+        sha256, user_id=user_id, account_id=account_id
+    )
     row = store.upsert_source(
+        user_id=user_id,
+        account_id=account_id,
         sha256=sha256,
         filename=filename,
         content_type=info.content_type,
@@ -939,6 +1368,8 @@ async def upload_image(
                 )
                 row = store.update_result(
                     sha256,
+                    user_id=user_id,
+                    account_id=account_id,
                     media_id=result["media_id"],
                     material_url=result["url"],
                 )
@@ -960,6 +1391,8 @@ async def upload_image(
             )
             row = store.update_result(
                 sha256,
+                user_id=user_id,
+                account_id=account_id,
                 article_url=article_url,
                 processed_bytes=len(prepared.data),
             )
@@ -975,6 +1408,8 @@ async def upload_image(
     result_status = "complete" if requested_ok else "partial" if any_ok else "failed"
     row = store.update_result(
         sha256,
+        user_id=user_id,
+        account_id=account_id,
         last_error="；".join(errors) if errors else None,
     )
     return {
@@ -989,17 +1424,27 @@ async def upload_image(
 @app.get("/api/assets")
 async def list_assets(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
     limit: int = 500,
 ) -> dict:
     store: AssetStore = request.app.state.store
+    account = _request_account(request)
+    account_id = int(account["id"]) if account else None
+    user_id = int(user["id"])
     await asyncio.to_thread(
         _cleanup_expired_temporary_assets, store, settings.temp_storage_path
     )
     wechat_rows, temporary_rows = await asyncio.gather(
-        asyncio.to_thread(store.list_assets, limit),
-        asyncio.to_thread(store.list_temporary_assets, limit=limit),
+        asyncio.to_thread(
+            store.list_assets,
+            limit,
+            user_id=user_id,
+            account_id=account_id,
+        ),
+        asyncio.to_thread(
+            store.list_temporary_assets, limit=limit, user_id=user_id
+        ),
     )
     items = [_public_asset(row) for row in wechat_rows]
     items.extend(
@@ -1021,8 +1466,11 @@ async def _delete_asset_item(
     settings: Settings,
 ) -> dict:
     store: AssetStore = request.app.state.store
+    user_id = _request_user_id(request)
     if item.kind == "temporary":
-        row = await asyncio.to_thread(store.get_temporary_asset_by_id, item.id)
+        row = await asyncio.to_thread(
+            store.get_temporary_asset_by_id, item.id, user_id=user_id
+        )
         if not row:
             return {"kind": item.kind, "id": item.id, "missing": True}
         await asyncio.to_thread(
@@ -1030,15 +1478,18 @@ async def _delete_asset_item(
         )
         return {"kind": item.kind, "id": item.id, "remote_deleted": False}
 
-    row = await asyncio.to_thread(store.get_asset, item.id)
+    row = await asyncio.to_thread(store.get_asset, item.id, user_id=user_id)
     if not row:
+        return {"kind": item.kind, "id": item.id, "missing": True}
+    active = _request_account(request)
+    if not active or int(row.get("account_id") or 0) != int(active["id"]):
         return {"kind": item.kind, "id": item.id, "missing": True}
     remote_deleted = False
     if row.get("media_id"):
         client = _require_wechat_config(request)
         await client.delete_permanent_material(row["media_id"])
         remote_deleted = True
-    await asyncio.to_thread(store.delete_asset, item.id)
+    await asyncio.to_thread(store.delete_asset, item.id, user_id=user_id)
     result = {
         "kind": item.kind,
         "id": item.id,
@@ -1083,7 +1534,7 @@ async def _delete_asset_items(
 async def delete_assets(
     payload: DeleteAssetsRequest,
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    _: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
@@ -1095,17 +1546,25 @@ async def delete_assets(
 @app.post("/api/assets/delete-all")
 async def delete_all_assets(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
     store: AssetStore = request.app.state.store
+    user_id = int(user["id"])
+    account = _request_account(request)
+    account_id = int(account["id"]) if account else None
     await asyncio.to_thread(
         _cleanup_expired_temporary_assets, store, settings.temp_storage_path
     )
     wechat_rows, temporary_rows = await asyncio.gather(
-        asyncio.to_thread(store.list_assets, None),
-        asyncio.to_thread(store.list_all_temporary_assets),
+        asyncio.to_thread(
+            store.list_assets,
+            None,
+            user_id=user_id,
+            account_id=account_id,
+        ),
+        asyncio.to_thread(store.list_all_temporary_assets, user_id=user_id),
     )
     items = [DeleteAssetItem(kind="wechat", id=row["id"]) for row in wechat_rows]
     items.extend(
@@ -1163,6 +1622,10 @@ async def api_create_wechat_draft(
     _: Annotated[str, Depends(_require_publish_api_key)],
 ) -> dict:
     client = _require_wechat_config(request)
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=True)
+    assert account is not None
+    account_id = int(account["id"])
     try:
         validation = validate_article_content(payload.content)
     except ArticleValidationError as exc:
@@ -1175,7 +1638,9 @@ async def api_create_wechat_draft(
         ).encode("utf-8")
     ).hexdigest()
     store: AssetStore = request.app.state.store
-    existing = store.get_draft_job_by_request_id(payload.request_id)
+    existing = store.get_draft_job_by_request_id(
+        payload.request_id, user_id=user_id, account_id=account_id
+    )
     if existing:
         if existing["content_hash"] != content_hash:
             raise HTTPException(
@@ -1230,6 +1695,8 @@ async def api_create_wechat_draft(
         job = store.update_draft_job(existing["id"], status="pending")
     else:
         job = store.create_draft_job(
+            user_id=user_id,
+            account_id=account_id,
             request_id=payload.request_id,
             content_hash=content_hash,
             title=payload.title,
@@ -1275,49 +1742,102 @@ async def api_create_wechat_draft(
     }
 
 
+@app.post(
+    "/api/drafts",
+    status_code=status.HTTP_201_CREATED,
+    summary="当前登录用户写入微信公众号草稿箱",
+)
+async def create_session_draft(
+    payload: DraftArticleRequest,
+    request: Request,
+    response: Response,
+    _: Annotated[dict, Depends(_require_auth)],
+) -> dict:
+    _require_ajax(request)
+    return await api_create_wechat_draft(payload, request, response, "session")
+
+
 @app.get("/api/drafts")
 async def list_drafts(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
-    limit: int = 200,
+    user: Annotated[dict, Depends(_require_auth)],
+    limit: int = 100,
+    offset: int = 0,
 ) -> dict:
     store: AssetStore = request.app.state.store
-    items = [_public_draft(row) for row in store.list_draft_jobs(limit=limit)]
-    return {"items": items, "count": len(items)}
+    account = _request_account(request)
+    account_id = int(account["id"]) if account else None
+    user_id = int(user["id"])
+    draft_filters = {"user_id": user_id, "account_id": account_id}
+    if user["role"] == "admin":
+        draft_filters = {}
+    items = [
+        _public_draft(row, current_user_id=user_id)
+        for row in store.list_draft_jobs(
+            limit=limit, offset=offset, **draft_filters
+        )
+    ]
+    total = store.count_draft_jobs(**draft_filters)
+    safe_offset = max(offset, 0)
+    return {
+        "items": items,
+        "count": total,
+        "limit": min(max(limit, 1), 1000),
+        "offset": safe_offset,
+        "has_more": safe_offset + len(items) < total,
+    }
 
 
 @app.get("/api/drafts/{draft_id}")
 async def get_draft(
     draft_id: int,
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
 ) -> dict:
     store: AssetStore = request.app.state.store
-    row = store.get_draft_job(draft_id)
+    row = store.get_draft_job(draft_id, user_id=int(user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="草稿记录不存在")
-    return {"draft": _public_draft(row, include_content=True)}
+    active = _request_account(request)
+    if not active or int(row.get("account_id") or 0) != int(active["id"]):
+        raise HTTPException(status_code=404, detail="草稿记录不存在")
+    return {
+        "draft": _public_draft(
+            row, include_content=True, current_user_id=int(user["id"])
+        )
+    }
 
 
 @app.post("/api/drafts/{draft_id}/delete")
 async def delete_draft(
     draft_id: int,
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
 ) -> dict:
     _require_ajax(request)
     store: AssetStore = request.app.state.store
-    row = store.get_draft_job(draft_id)
+    row = store.get_draft_job(draft_id, user_id=int(user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="草稿记录不存在")
+    active = _request_account(request)
+    row_account_id = int(row.get("account_id") or 0)
+    if user["role"] != "admin" and (
+        not active or row_account_id != int(active["id"])
+    ):
+        raise HTTPException(status_code=404, detail="草稿记录不存在")
+    account = store.get_official_account(
+        row_account_id, user_id=int(user["id"])
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="草稿记录不存在")
     if row.get("media_id") and row["status"] != "deleted":
-        client = _require_wechat_config(request)
+        client = _wechat_client_for_account(request, account)
         try:
             await client.delete_draft(row["media_id"])
         except WechatAPIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     updated = store.update_draft_job(draft_id, status="deleted")
-    return {"draft": _public_draft(updated)}
+    return {"draft": _public_draft(updated, current_user_id=int(user["id"]))}
 
 
 @app.post(
@@ -1394,7 +1914,9 @@ async def api_list_temporary_images(
     )
     items = [
         _public_temporary_asset(row, request, settings)
-        for row in store.list_temporary_assets(limit=limit)
+        for row in store.list_temporary_assets(
+            limit=limit, user_id=_request_user_id(request)
+        )
     ]
     return {
         "items": items,
@@ -1439,7 +1961,7 @@ async def get_temporary_image(
 @app.get("/api/export.csv")
 async def export_csv(
     request: Request,
-    _: Annotated[str, Depends(_require_auth)],
+    user: Annotated[dict, Depends(_require_auth)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> Response:
     store: AssetStore = request.app.state.store
@@ -1448,6 +1970,9 @@ async def export_csv(
     )
     output = io.StringIO()
     writer = csv.writer(output)
+    user_id = int(user["id"])
+    account = _request_account(request)
+    account_id = int(account["id"]) if account else None
     writer.writerow(
         [
             "文件名",
@@ -1462,7 +1987,9 @@ async def export_csv(
             "错误",
         ]
     )
-    for row in store.list_assets(2000):
+    for row in store.list_assets(
+        2000, user_id=user_id, account_id=account_id
+    ):
         writer.writerow(
             [
                 _csv_safe(value)
@@ -1480,7 +2007,7 @@ async def export_csv(
                 ]
             ]
         )
-    for row in store.list_temporary_assets(limit=2000):
+    for row in store.list_temporary_assets(limit=2000, user_id=user_id):
         item = _public_temporary_asset(row, request, settings)
         writer.writerow(
             [

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+## 3.2.0 - 2026-08-18
+
+- Add first-run console setup with encrypted, automatically generated API keys.
+- Store administrator passwords as Argon2 hashes and support immediate password rotation with full session revocation.
+- Add self-service user registration with administrator and regular-user roles.
+- Add per-user management and switching for multiple subscription or service accounts.
+- Isolate account credentials, assets, temporary images, and drafts between users and official accounts.
+- Migrate legacy single-account data to schema v3 while revoking pre-migration sessions.
+- Let administrators review all users' drafts with owner and official-account labels while keeping other users' drafts read-only.
+- Protect first-run setup with a one-time code and bind the Docker port to localhost by default.
+- Recover schema-v1 account, asset, temporary-image, and draft ownership after administrator creation.
+- Add registration throttling, transaction-safe user limits, account limits, and per-user temporary-storage quotas.
+- Add session-authenticated draft creation, paginated draft listings, and cross-account deletion for administrators' own drafts.
+- Clear user-specific browser state before switching sessions.
+- Open the stable WeChat Official Account entry point in a new tab without relying on an expiring web token.
+
 ## 3.1.1 - 2026-08-18
 
 - Add an admin-only Skill client configuration panel with masked keys, one-click copying, and no-store responses.

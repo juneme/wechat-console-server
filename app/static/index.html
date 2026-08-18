@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light">
     <title>微信公众号控制台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v=5">
+    <link rel="stylesheet" href="/static/app.css?v=8">
   </head>
   <body>
     <section id="authView" class="auth-view" aria-labelledby="loginTitle">
@@ -26,16 +26,46 @@
         <p class="visual-caption">WECHAT OPERATIONS CONSOLE <span>2026</span></p>
       </div>
       <div class="auth-panel">
-        <form id="loginForm" class="login-form">
+        <form id="loginForm" class="login-form" hidden>
           <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
-          <p class="kicker">ADMIN ACCESS</p>
+          <p class="kicker">ACCOUNT ACCESS</p>
           <h1 id="loginTitle">登录控制台</h1>
-          <label class="field-label" for="loginUsername">管理员账号</label>
+          <label class="field-label" for="loginUsername">用户名</label>
           <input id="loginUsername" class="text-input" name="username" type="text" autocomplete="username" maxlength="128" required autofocus>
           <label class="field-label" for="loginPassword">密码</label>
           <input id="loginPassword" class="text-input" name="password" type="password" autocomplete="current-password" maxlength="256" required>
           <p id="loginError" class="form-error" role="alert" aria-live="polite"></p>
           <button id="loginSubmit" class="button primary wide" type="submit">登录</button>
+          <button id="showRegister" class="auth-switch" type="button">没有账号？立即注册</button>
+        </form>
+        <form id="registerForm" class="register-form" hidden>
+          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <p class="kicker">CREATE ACCOUNT</p>
+          <h1 id="registerTitle">注册账号</h1>
+          <label class="field-label" for="registerUsername">用户名</label>
+          <input id="registerUsername" class="text-input" name="username" type="text" autocomplete="username" maxlength="128" required>
+          <label class="field-label" for="registerPassword">密码</label>
+          <input id="registerPassword" class="text-input" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+          <label class="field-label" for="registerPasswordConfirm">确认密码</label>
+          <input id="registerPasswordConfirm" class="text-input" name="password-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+          <p id="registerError" class="form-error" role="alert" aria-live="polite"></p>
+          <button id="registerSubmit" class="button primary wide" type="submit">注册并登录</button>
+          <button id="showLogin" class="auth-switch" type="button">已有账号？返回登录</button>
+        </form>
+        <form id="setupForm" class="setup-form" hidden>
+          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <p class="kicker">FIRST RUN</p>
+          <h1 id="setupTitle">初始化控制台</h1>
+          <label class="field-label" for="setupToken">一次性初始化码</label>
+          <input id="setupToken" class="text-input mono" name="setup-token" type="password" autocomplete="one-time-code" minlength="16" maxlength="256" required>
+          <label class="field-label" for="setupUsername">管理员账号</label>
+          <input id="setupUsername" class="text-input" name="username" type="text" autocomplete="username" maxlength="128" required>
+          <label class="field-label" for="setupPassword">管理员密码</label>
+          <input id="setupPassword" class="text-input" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+          <label class="field-label" for="setupPasswordConfirm">确认密码</label>
+          <input id="setupPasswordConfirm" class="text-input" name="password-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" required>
+          <p id="setupError" class="form-error" role="alert" aria-live="polite"></p>
+          <button id="setupSubmit" class="button primary wide" type="submit">创建管理员</button>
         </form>
       </div>
     </section>
@@ -50,6 +80,7 @@
           <button class="nav-item" type="button" data-view="assets"><span>素材库</span><small>03</small></button>
           <button class="nav-item" type="button" data-view="drafts"><span>草稿箱</span><small>04</small></button>
           <button class="nav-item" type="button" data-view="api"><span>API 接入</span><small>05</small></button>
+          <button class="nav-item" type="button" data-view="security"><span>安全设置</span><small>06</small></button>
         </nav>
         <div class="sidebar-footer"><span id="currentUsername"></span><button id="logoutButton" class="text-button" type="button">退出</button></div>
       </aside>
@@ -57,7 +88,7 @@
       <div class="workspace">
         <header class="workspace-header">
           <div><p class="kicker" id="viewKicker">CONTROL CENTER</p><h1 id="viewTitle">运行总览</h1></div>
-          <div class="header-actions"><span id="connectionState" class="status-badge pending">检查中</span><button id="testConnection" class="button secondary" type="button">测试连接</button></div>
+          <div class="header-actions"><select id="accountSwitcher" class="account-switcher" aria-label="当前公众号" disabled><option>暂无公众号</option></select><span id="connectionState" class="status-badge pending">检查中</span><button id="testConnection" class="button secondary" type="button">测试连接</button></div>
         </header>
 
         <main>
@@ -79,8 +110,12 @@
           </section>
 
           <section class="view" data-view-panel="account">
+            <section class="content-section">
+              <div class="section-heading"><div><p class="section-index">ACCOUNTS</p><h2>我的公众号 <span id="accountCount" class="muted-count"></span></h2></div><button id="newAccount" class="button primary" type="button">添加公众号</button></div>
+              <div id="accountList" class="account-list"></div>
+            </section>
             <section class="content-section account-layout">
-              <div class="section-heading"><div><p class="section-index">ACCOUNT</p><h2>公众号凭据</h2></div><span id="accountSource" class="source-label"></span></div>
+              <div class="section-heading"><div><p class="section-index">ACCOUNT</p><h2 id="accountFormTitle">添加公众号</h2></div><span id="accountSource" class="source-label"></span></div>
               <form id="accountForm" class="settings-form">
                 <div class="form-grid">
                   <label><span>公众号名称</span><input id="accountName" class="text-input" type="text" maxlength="80" required></label>
@@ -113,13 +148,14 @@
 
           <section class="view" data-view-panel="drafts">
             <section class="content-section">
-              <div class="section-heading"><div><p class="section-index">DRAFTS</p><h2>草稿任务 <span id="draftCount" class="muted-count"></span></h2></div><button id="refreshDrafts" class="button secondary" type="button">刷新</button></div>
+              <div class="section-heading stack-mobile"><div><p class="section-index">DRAFTS</p><h2>草稿任务 <span id="draftCount" class="muted-count"></span></h2></div><div class="header-actions"><a class="button secondary" href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer" title="登录后请从微信公众平台进入草稿箱">打开微信公众平台</a><button id="refreshDrafts" class="button secondary" type="button">刷新</button></div></div>
               <div id="draftTable" class="data-table"></div>
+              <div class="draft-pagination"><button id="loadMoreDrafts" class="button secondary" type="button" hidden>加载更多</button></div>
             </section>
           </section>
 
           <section class="view" data-view-panel="api">
-            <section class="content-section">
+            <section id="adminSkillSection" class="content-section">
               <div class="section-heading stack-mobile">
                 <div><p class="section-index">SKILL CONFIG</p><h2>Skill 客户端配置</h2></div>
                 <div class="header-actions"><button id="toggleSkillConfig" class="button primary" type="button">显示配置</button><button id="copySkillConfig" class="button secondary" type="button" disabled>复制全部</button></div>
@@ -146,12 +182,26 @@
               <div class="security-grid"><div><strong>AppSecret</strong><span>仅服务端加密保存</span></div><div><strong>Access Token</strong><span>自动缓存与刷新</span></div><div><strong>API Key</strong><span>图片与发布权限隔离</span></div></div>
             </section>
           </section>
+
+          <section class="view" data-view-panel="security">
+            <section class="content-section account-layout">
+              <div class="section-heading"><div><p class="section-index">SECURITY</p><h2>修改登录密码</h2></div></div>
+              <form id="passwordForm" class="settings-form">
+                <div class="form-grid password-grid">
+                  <label><span>当前密码</span><input id="currentPassword" class="text-input" type="password" autocomplete="current-password" maxlength="256" required></label>
+                  <label><span>新密码</span><input id="newPassword" class="text-input" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+                  <label><span>确认新密码</span><input id="newPasswordConfirm" class="text-input" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+                </div>
+                <div class="settings-footer"><p id="passwordError" class="form-error" role="alert" aria-live="polite"></p><div><button id="passwordSubmit" class="button primary" type="submit">修改并重新登录</button></div></div>
+              </form>
+            </section>
+          </section>
         </main>
       </div>
 
       <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><h3 id="confirmTitle">确认操作</h3><p id="confirmMessage"></p><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirmAction" class="button danger" value="confirm">确认</button></div></form></dialog>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=6" defer></script>
+    <script src="/static/app.js?v=10" defer></script>
   </body>
 </html>

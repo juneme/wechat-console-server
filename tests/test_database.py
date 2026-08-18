@@ -1,8 +1,31 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 from app.database import CURRENT_SCHEMA_VERSION, AssetStore
+
+
+def test_user_limit_is_atomic_across_concurrent_creates(tmp_path: Path) -> None:
+    store = AssetStore(tmp_path / "uploader.sqlite3")
+    store.initialize()
+    assert store.initialize_admin_credentials("admin", "admin-hash")
+    barrier = Barrier(5)
+
+    def create(index: int) -> dict | None:
+        barrier.wait()
+        return store.create_user(
+            username=f"member-{index}",
+            password_hash="member-hash",
+            max_users=2,
+        )
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(create, range(5)))
+
+    assert sum(result is not None for result in results) == 1
+    assert store.count_users() == 2
 
 
 def test_asset_store_closes_connections_and_deletes_rows(tmp_path: Path) -> None:
@@ -61,5 +84,348 @@ def test_legacy_database_is_backed_up_and_versioned(tmp_path: Path) -> None:
             "preserved"
         )
         assert connection.execute(
-            "SELECT version FROM schema_migrations"
+            "SELECT MAX(version) FROM schema_migrations"
         ).fetchone()[0] == CURRENT_SCHEMA_VERSION
+
+
+def test_v1_migration_claims_legacy_data_after_admin_is_created(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "v1.sqlite3"
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    expires_at = (datetime.now(UTC) + timedelta(days=1)).isoformat(
+        timespec="seconds"
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sha256 TEXT NOT NULL UNIQUE,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                processed_bytes INTEGER,
+                width INTEGER,
+                height INTEGER,
+                media_id TEXT,
+                material_url TEXT,
+                article_url TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE temporary_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL UNIQUE,
+                sha256 TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                stored_name TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                processed_bytes INTEGER NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE admin_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE wechat_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                display_name TEXT NOT NULL,
+                account_type TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                app_secret_ciphertext TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE draft_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL UNIQUE,
+                content_hash TEXT NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_source_url TEXT NOT NULL,
+                thumb_media_id TEXT NOT NULL,
+                need_open_comment INTEGER NOT NULL,
+                only_fans_can_comment INTEGER NOT NULL,
+                media_id TEXT,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            PRAGMA user_version = 1;
+            """
+        )
+        connection.execute("INSERT INTO schema_migrations VALUES (1, ?)", (now,))
+        connection.execute(
+            "INSERT INTO wechat_account VALUES (1, ?, ?, ?, ?, ?, ?)",
+            ("旧公众号", "subscription", "wx-v1", "encrypted", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO assets (
+                sha256, filename, content_type, original_bytes, media_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("a" * 64, "v1.png", "image/png", 100, "media-v1", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO temporary_assets (
+                token, sha256, filename, stored_name, content_type,
+                original_bytes, processed_bytes, width, height,
+                created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "temporary-v1-token",
+                "b" * 64,
+                "temporary-v1.png",
+                "temporary-v1.png",
+                "image/png",
+                100,
+                80,
+                10,
+                10,
+                now,
+                expires_at,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO draft_jobs (
+                request_id, content_hash, title, author, digest, content,
+                content_source_url, thumb_media_id, need_open_comment,
+                only_fans_can_comment, media_id, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "v1-draft",
+                "c" * 64,
+                "v1 草稿",
+                "",
+                "",
+                "<p>v1</p>",
+                "",
+                "cover",
+                0,
+                0,
+                "draft-media-v1",
+                "created",
+                now,
+                now,
+            ),
+        )
+
+    store = AssetStore(database_path)
+    store.initialize()
+    assert store.get_admin_user() is None
+    assert store.initialize_admin_credentials("v1-admin", "password-hash")
+
+    admin = store.get_admin_user()
+    assert admin is not None
+    accounts = store.list_official_accounts(admin["id"])
+    assert len(accounts) == 1
+    assert accounts[0]["app_id"] == "wx-v1"
+    assert store.list_assets(
+        user_id=admin["id"], account_id=accounts[0]["id"]
+    )[0]["filename"] == "v1.png"
+    assert store.list_temporary_assets(user_id=admin["id"])[0]["filename"] == (
+        "temporary-v1.png"
+    )
+    assert store.list_draft_jobs(
+        user_id=admin["id"], account_id=accounts[0]["id"]
+    )[0]["request_id"] == "v1-draft"
+
+
+def test_v2_migration_assigns_legacy_data_to_admin_and_revokes_sessions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "v2.sqlite3"
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    expires_at = (datetime.now(UTC) + timedelta(days=1)).isoformat(
+        timespec="seconds"
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE admin_credentials (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE admin_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE wechat_account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                display_name TEXT NOT NULL,
+                account_type TEXT NOT NULL,
+                app_id TEXT NOT NULL,
+                app_secret_ciphertext TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sha256 TEXT NOT NULL UNIQUE,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                processed_bytes INTEGER,
+                width INTEGER,
+                height INTEGER,
+                media_id TEXT,
+                material_url TEXT,
+                article_url TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE temporary_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL UNIQUE,
+                sha256 TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                stored_name TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                processed_bytes INTEGER NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE draft_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL UNIQUE,
+                content_hash TEXT NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_source_url TEXT NOT NULL,
+                thumb_media_id TEXT NOT NULL,
+                need_open_comment INTEGER NOT NULL,
+                only_fans_can_comment INTEGER NOT NULL,
+                media_id TEXT,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            PRAGMA user_version = 2;
+            """
+        )
+        connection.execute(
+            "INSERT INTO admin_credentials VALUES (1, ?, ?, ?, ?)",
+            ("legacy-admin", "legacy-hash", now, now),
+        )
+        connection.execute(
+            "INSERT INTO admin_sessions "
+            "(token_hash, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            ("legacy-token", "legacy-admin", now, expires_at),
+        )
+        connection.execute(
+            "INSERT INTO wechat_account VALUES (1, ?, ?, ?, ?, ?, ?)",
+            ("旧公众号", "subscription", "wx-legacy", "encrypted", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO assets (
+                sha256, filename, content_type, original_bytes, media_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("a" * 64, "legacy.png", "image/png", 100, "media-legacy", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO temporary_assets (
+                token, sha256, filename, stored_name, content_type,
+                original_bytes, processed_bytes, width, height,
+                created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "temporary-legacy-token",
+                "b" * 64,
+                "temporary.png",
+                "temporary.png",
+                "image/png",
+                100,
+                80,
+                10,
+                10,
+                now,
+                expires_at,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO draft_jobs (
+                request_id, content_hash, title, author, digest, content,
+                content_source_url, thumb_media_id, need_open_comment,
+                only_fans_can_comment, media_id, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-draft",
+                "c" * 64,
+                "旧草稿",
+                "",
+                "",
+                "<p>legacy</p>",
+                "",
+                "cover",
+                0,
+                0,
+                "draft-media",
+                "created",
+                now,
+                now,
+            ),
+        )
+
+    store = AssetStore(database_path)
+    store.initialize()
+
+    admin = store.get_admin_user()
+    assert admin is not None
+    assert admin["username"] == "legacy-admin"
+    assert admin["role"] == "admin"
+    accounts = store.list_official_accounts(admin["id"])
+    assert len(accounts) == 1
+    assert accounts[0]["app_id"] == "wx-legacy"
+    assert store.get_active_official_account(admin["id"])["id"] == accounts[0]["id"]
+    assert store.list_assets(
+        user_id=admin["id"], account_id=accounts[0]["id"]
+    )[0]["filename"] == "legacy.png"
+    assert store.list_temporary_assets(user_id=admin["id"])[0]["filename"] == (
+        "temporary.png"
+    )
+    assert store.list_draft_jobs(
+        user_id=admin["id"], account_id=accounts[0]["id"]
+    )[0]["request_id"] == "legacy-draft"
+    assert store.get_admin_session("legacy-token") is None
