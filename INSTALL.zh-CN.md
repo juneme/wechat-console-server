@@ -160,7 +160,7 @@ docker compose cp uploader:/data/uploader.sqlite3 ./uploader-$(date +%F-%H%M%S).
 
 ```bash
 python scripts/build_release.py
-python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.0-$(date +%Y%m%d).zip
+python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.1-$(date +%Y%m%d).zip
 ```
 
 构建器只收集白名单中的服务端运行文件、开源文档和运维脚本，并在 ZIP 中生成 `RELEASE-MANIFEST.sha256`。`.env`、SQLite、密钥文件、缓存、已有 `artifacts` 和独立 Skill 源码不会进入发布包。

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.2.1 - 2026-08-20
+
+- Add real console screenshots and a shared end-to-end project workflow to the GitHub homepage.
+- Present `wechat-console-server` and `wechat-article-designer` as the two parts of one WeChat article workflow with bidirectional documentation links.
+- Include all README images in verified server release archives for offline documentation.
+
 ## 3.2.0 - 2026-08-18
 
 - Add first-run console setup with encrypted, automatically generated API keys.

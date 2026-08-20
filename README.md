@@ -1,10 +1,31 @@
 # 微信公众号控制台
 
-一个部署在服务器上的多用户微信公众号管理控制台。每个用户可以管理和切换多个订阅号或服务号，公众号凭据、图片素材和草稿记录相互隔离；AppSecret 仅在服务端加密保存，浏览器和 AI 客户端都无法读取。
+[![Release](https://img.shields.io/github/v/release/juneme/wechat-console-server?style=flat-square&color=F1C75B)](https://github.com/juneme/wechat-console-server/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/juneme/wechat-console-server/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/juneme/wechat-console-server/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/juneme/wechat-console-server?style=flat-square)](LICENSE)
+[![Article Designer](https://img.shields.io/badge/companion-wechat--article--designer-07C160?style=flat-square&logo=github&logoColor=white)](https://github.com/juneme/wechat-article-designer)
 
-配套的 [`wechat-article-designer`](https://github.com/juneme/wechat-article-designer) Codex Skill 独立维护。完整链路是：Codex 设计文章，控制台代管微信凭据并上传图片，用户确认后写入微信公众号草稿箱。
+![微信公众号控制台运行总览：连接状态、素材、草稿和 API 状态](docs/images/console-overview.png)
 
-## 十分钟快速开始
+部署在服务器上的多用户微信公众号控制台：加密托管 AppSecret，隔离用户、公众号、素材与草稿记录，并向 Codex 提供受控的图片上传和草稿写入接口。浏览器与 AI 客户端都无法读取 AppSecret。
+
+## 完整项目 = Skill + Server
+
+| 设计端：[`wechat-article-designer`](https://github.com/juneme/wechat-article-designer) | 交付端：本仓库 |
+|---|---|
+| 理解文章、综合原创视觉、组织中文移动排版、校验公众号 HTML | 管理公众号与凭据、上传图片、运行诊断、幂等写入草稿箱 |
+| 安装在运行 Codex 的电脑上 | 部署在有固定公网出口 IP 的服务器上 |
+| 不读取 AppSecret，不自动群发 | 不负责写文章，不向客户端暴露 AppSecret |
+
+![从文章内容经 Article Designer 和 Console Server 进入微信公众号草稿箱的完整流程](docs/images/project-flow.svg)
+
+## 真实控制台
+
+![API 接入界面：默认隐藏 Skill 配置，列出图片、草稿与临时图片接口](docs/images/console-api.png)
+
+API Key 默认隐藏，配置响应禁止浏览器缓存；截图仅使用本地演示数据，不包含真实公众号凭据。
+
+## 三步开始
 
 ### 1. 部署控制台
 
@@ -13,38 +34,31 @@ cp .env.example .env
 bash install.sh
 ```
 
-`install.sh` 会输出一次性初始化码。先把 HTTPS 域名反向代理到 `http://127.0.0.1:8787`，再用该初始化码创建管理员账号和密码。控制台会生成并加密保存三类 API Key，随后进入“公众号设置”添加首个公众号。其他用户可从登录页自行注册，并分别添加、切换和管理自己的订阅号或服务号。把服务器出口 IPv4 加入各公众号的微信公众平台白名单后，在“API 接入”运行诊断。
+将 HTTPS 域名反向代理到 `http://127.0.0.1:8787`，使用脚本输出的一次性初始化码创建管理员，再添加公众号并把服务器出口 IPv4 加入微信公众平台白名单。完整要求见 [`INSTALL.zh-CN.md`](INSTALL.zh-CN.md)。
 
-### 2. 获取 Skill 客户端配置
+### 2. 取得 Skill 配置
 
-使用管理员账号登录控制台，打开“API 接入 → Skill 客户端配置”，点击“显示配置”即可查看并复制三个客户端变量。普通用户不会显示该配置区；API Key 默认隐藏，配置响应不会被浏览器缓存。
-
-命令行方式保留作为服务器维护备用：
+登录后打开“API 接入 → Skill 客户端配置”，点击“显示配置”取得 `WECHAT_CONSOLE_URL`、`WECHAT_IMAGE_API_KEY` 和 `WECHAT_PUBLISH_API_KEY`。命令行维护入口仍可使用：
 
 ```bash
-bash show-client-config.sh --url https://你的控制台域名
 bash show-client-config.sh --url https://你的控制台域名 --show-secrets
 ```
 
-第二条命令需要人工确认，随后输出 `WECHAT_CONSOLE_URL`、`WECHAT_IMAGE_API_KEY` 和 `WECHAT_PUBLISH_API_KEY`。不要把面板或命令输出提交到 Git、Issue、截图或聊天记录。
+该命令需要人工确认。不要把密钥提交到 Git、Issue、截图或聊天记录。
 
-### 3. 安装 Skill
-
-在运行 Codex 的 Windows 电脑执行：
+### 3. 安装设计 Skill
 
 ```powershell
 git clone https://github.com/juneme/wechat-article-designer.git "$env:USERPROFILE\.codex\skills\wechat-article-designer"
 ```
 
-将上一步的三个变量配置到运行 Codex 的用户环境，重启 Codex 后使用：
+把三个变量配置到运行 Codex 的用户环境，重启 Codex 后即可先预览文章：
 
 ```text
 使用 $wechat-article-designer 制作这篇公众号文章，先预览，不要写入草稿箱。
 ```
 
-确认内容后再明确回复“写入微信公众号草稿箱”。Skill 不会因为预览、排版或上传图片而自动创建草稿。
-
-服务器详细部署见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)，API 契约见 [API.zh-CN.md](API.zh-CN.md)，Skill 直发流程见独立仓库的 [direct-publishing.md](https://github.com/juneme/wechat-article-designer/blob/main/references/direct-publishing.md)。
+确认内容后再明确授权“写入微信公众号草稿箱”。预览、排版或上传图片不会自动创建草稿，草稿也不会自动群发。API 契约见 [`API.zh-CN.md`](API.zh-CN.md)，Skill 直发规则见 [`direct-publishing.md`](https://github.com/juneme/wechat-article-designer/blob/main/references/direct-publishing.md)。
 
 ## 控制台能力
 
@@ -178,7 +192,7 @@ uvicorn app.main:app --reload
 
 ```bash
 python scripts/build_release.py
-python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.0-$(date +%Y%m%d).zip
+python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.1-$(date +%Y%m%d).zip
 ```
 
 服务端包只包含控制台、部署脚本和服务端文档，并使用白名单排除 `.env`、SQLite、密钥、缓存、旧产物及 Skill 源码；ZIP 内的 `RELEASE-MANIFEST.sha256` 可校验每个文件。Skill 在独立仓库中发布。
