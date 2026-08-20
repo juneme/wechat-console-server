@@ -1,6 +1,6 @@
 # 微信公众号控制台 - 服务器安装说明
 
-本包适用于已安装 Docker 的 Linux 服务器和宝塔面板。应用仅监听服务器本机 `127.0.0.1:8787`，外部访问必须通过宝塔或 Nginx HTTPS 反向代理，不能直接从公网访问容器端口。
+本包适用于已安装 Docker 的 Linux 服务器和宝塔面板。应用仅监听服务器本机 `127.0.0.1:8791`，外部访问必须通过宝塔或 Nginx HTTPS 反向代理，不能直接从公网访问容器端口。
 
 ## 1. 从 GitHub 拉取
 
@@ -58,7 +58,7 @@ bash install.sh
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:8791/healthz
 docker compose logs --tail=100 uploader
 ```
 
@@ -69,7 +69,7 @@ docker compose logs --tail=100 uploader
 ## 4. 宝塔反向代理和 HTTPS
 
 1. 在宝塔“网站”中添加用于本工具的域名，不要覆盖现有站点。
-2. 打开该站点的“反向代理”，目标 URL 填 `http://127.0.0.1:8787`。
+2. 打开该站点的“反向代理”，目标 URL 填 `http://127.0.0.1:8791`。
 3. 发送域名保持默认开启；代理超时建议设为 `120` 秒。
 4. 在“SSL”中申请 Let's Encrypt 证书，验证正常后开启强制 HTTPS。
 5. 网站配置中的请求体限制设为至少 `32m`。示例 Nginx 配置见 `nginx/wechat-uploader.conf`。
@@ -160,7 +160,7 @@ docker compose cp uploader:/data/uploader.sqlite3 ./uploader-$(date +%F-%H%M%S).
 
 ```bash
 python scripts/build_release.py
-python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.1-$(date +%Y%m%d).zip
+python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.2-$(date +%Y%m%d).zip
 ```
 
 构建器只收集白名单中的服务端运行文件、开源文档和运维脚本，并在 ZIP 中生成 `RELEASE-MANIFEST.sha256`。`.env`、SQLite、密钥文件、缓存、已有 `artifacts` 和独立 Skill 源码不会进入发布包。
@@ -170,7 +170,7 @@ python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3
 ### 端口被占用
 
 ```bash
-ss -lntp | grep ':8787'
+ss -lntp | grep ':8791'
 ```
 
 如果已有其他程序占用端口，修改 `docker-compose.yml` 左侧端口，例如 `127.0.0.1:8789:8000`，并同步修改宝塔反向代理目标。
@@ -195,4 +195,4 @@ ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
 
 ### 反向代理出现 502
 
-先在服务器执行 `curl http://127.0.0.1:8787/healthz`。本机健康但域名 502 时，检查宝塔反向代理目标、站点 Nginx 配置和防火墙；本机也失败时查看容器日志。
+先在服务器执行 `curl http://127.0.0.1:8791/healthz`。本机健康但域名 502 时，检查宝塔反向代理目标、站点 Nginx 配置和防火墙；本机也失败时查看容器日志。

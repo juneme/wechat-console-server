@@ -5,8 +5,8 @@
 2. 部署目录固定为 /www/docker/wechat-material-uploader。
 3. 从 .env.example 创建 .env，允许所有配置保持为空；install.sh 会在私密终端输出一次性初始化码，用户用它完成首次初始化。不要把初始化码或任何密钥输出到聊天和最终报告中。初始化后可在网页添加和切换多个公众号，登录页开放普通用户自行注册。
 4. 执行：cd /www/docker/wechat-material-uploader && bash install.sh
-5. 验证：docker compose ps；curl -fsS http://127.0.0.1:8787/healthz
-6. 在宝塔中新建独立站点，把域名 HTTPS 反向代理到 http://127.0.0.1:8787，请求体限制至少 32m，超时至少 120 秒。
+5. 验证：docker compose ps；curl -fsS http://127.0.0.1:8791/healthz
+6. 在宝塔中新建独立站点，把域名 HTTPS 反向代理到 http://127.0.0.1:8791，请求体限制至少 32m，超时至少 120 秒。
 7. 验证临时托管：上传一张测试图，确认处理后严格小于 1MB、返回公网 URL 与 expires_at，公开 URL 可读取；确认首页刷新后仍显示历史图片。
 8. 若配置了微信密钥，确认服务器公网 IP 1.14.1.207 已加入微信公众号 API 调用 IP 白名单，并按 API.zh-CN.md 验证 /api/v1/wechat-images 返回 filename、url、size 和 uploaded_at。
 9. 最后只汇报容器状态、健康检查、访问域名、三个 API 是否可用和仍缺少的配置，不显示任何 AppSecret、API Key、加密主密钥或管理密码。

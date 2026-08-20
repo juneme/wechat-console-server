@@ -23,9 +23,9 @@ docker compose up -d --build
 
 echo "等待健康检查..."
 for _ in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
+  if curl -fsS http://127.0.0.1:8791/healthz >/dev/null 2>&1; then
     setup_code="$(docker compose exec -T uploader sh -c 'cat /data/.wechat-setup-token 2>/dev/null || true' | tr -d '\r\n')"
-    echo "部署成功。服务默认只监听服务器本机 127.0.0.1:8787。"
+    echo "部署成功。服务默认只监听服务器本机 127.0.0.1:8791。"
     if [[ -n "$setup_code" ]]; then
       echo "一次性初始化码：$setup_code"
       echo "请通过已配置的 HTTPS 反向代理打开控制台并完成初始化。"

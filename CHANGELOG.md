@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+## 3.2.2 - 2026-08-20
+
 - Add a product-focused console visual and a creator-value visual to the GitHub homepage.
 - Move the real overview screenshot into the console gallery alongside the API screenshot.
 - Include the new README visuals in verified server release archives.
+- Change the localhost listener and reverse-proxy target from `127.0.0.1:8787` to `127.0.0.1:8791` while keeping the container port at `8000`.
 
 ## 3.2.1 - 2026-08-20
 

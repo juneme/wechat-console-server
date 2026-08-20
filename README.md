@@ -202,7 +202,7 @@ uvicorn app.main:app --reload
 
 ```bash
 python scripts/build_release.py
-python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.1-$(date +%Y%m%d).zip
+python scripts/build_release.py --verify-only artifacts/wechat-console-server-v3.2.2-$(date +%Y%m%d).zip
 ```
 
 服务端包只包含控制台、部署脚本和服务端文档，并使用白名单排除 `.env`、SQLite、密钥、缓存、旧产物及 Skill 源码；ZIP 内的 `RELEASE-MANIFEST.sha256` 可校验每个文件。Skill 在独立仓库中发布。

@@ -8,7 +8,7 @@ console_url=""
 
 usage() {
   cat <<'EOF'
-Usage: bash show-client-config.sh [--url http://server:8787] [--show-secrets]
+Usage: bash show-client-config.sh [--url http://server:8791] [--show-secrets]
 
 Without --show-secrets, only configuration readiness is shown. Revealing the
 client configuration requires an interactive confirmation and should be done
@@ -70,7 +70,7 @@ if [[ -z "$console_url" ]]; then
   console_url="$(read_env PUBLIC_BASE_URL)"
 fi
 [[ "$console_url" =~ ^https?://[^[:space:]]+$ ]] || {
-  echo "ERROR: provide --url with the console root URL, for example http://SERVER_IP:8787" >&2
+  echo "ERROR: provide --url with the console root URL, for example http://SERVER_IP:8791" >&2
   exit 1
 }
 console_url="${console_url%/}"
