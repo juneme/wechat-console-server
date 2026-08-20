@@ -34,7 +34,7 @@ cp .env.example .env
 bash install.sh
 ```
 
-将 HTTPS 域名反向代理到 `http://127.0.0.1:8787`，使用脚本输出的一次性初始化码创建管理员，再添加公众号并把服务器出口 IPv4 加入微信公众平台白名单。完整要求见 [`INSTALL.zh-CN.md`](INSTALL.zh-CN.md)。
+将 HTTPS 域名反向代理到 `http://127.0.0.1:8791`，使用脚本输出的一次性初始化码创建管理员，再添加公众号并把服务器出口 IPv4 加入微信公众平台白名单。完整要求见 [`INSTALL.zh-CN.md`](INSTALL.zh-CN.md)。
 
 ### 2. 取得 Skill 配置
 
