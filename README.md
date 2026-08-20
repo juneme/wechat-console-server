@@ -128,10 +128,10 @@ cp .env.example .env
 # 所有配置均可留空，首次访问时由初始化界面引导配置
 docker compose up -d --build
 docker compose ps
-curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:8791/healthz
 ```
 
-应用只绑定服务器本机 `127.0.0.1:8787`，必须通过 [nginx/wechat-uploader.conf](nginx/wechat-uploader.conf) 所示的 HTTPS 反向代理访问。全新数据库会生成 `/data/.wechat-setup-token`；`install.sh` 在私密终端显示该一次性初始化码，初始化成功后立即删除。管理员密码以 Argon2 哈希保存，API Key 使用本地密钥加密保存。
+应用只绑定服务器本机 `127.0.0.1:8791`，必须通过 [nginx/wechat-uploader.conf](nginx/wechat-uploader.conf) 所示的 HTTPS 反向代理访问。全新数据库会生成 `/data/.wechat-setup-token`；`install.sh` 在私密终端显示该一次性初始化码，初始化成功后立即删除。管理员密码以 Argon2 哈希保存，API Key 使用本地密钥加密保存。
 
 更新：
 
