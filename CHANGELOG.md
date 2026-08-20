@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a product-focused console visual and a creator-value visual to the GitHub homepage.
+- Move the real overview screenshot into the console gallery alongside the API screenshot.
+- Include the new README visuals in verified server release archives.
+
 ## 3.2.1 - 2026-08-20
 
 - Add real console screenshots and a shared end-to-end project workflow to the GitHub homepage.

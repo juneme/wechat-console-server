@@ -40,6 +40,8 @@ SERVER_MANIFEST = (
     "docs/images/console-api.png",
     "docs/images/console-overview.png",
     "docs/images/project-flow.svg",
+    "docs/images/social/creator-value.png",
+    "docs/images/social/server-showcase.png",
     "install.sh",
     "nginx/wechat-uploader.conf",
     "pyproject.toml",

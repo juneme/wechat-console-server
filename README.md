@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/juneme/wechat-console-server?style=flat-square)](LICENSE)
 [![Article Designer](https://img.shields.io/badge/companion-wechat--article--designer-07C160?style=flat-square&logo=github&logoColor=white)](https://github.com/juneme/wechat-article-designer)
 
-![微信公众号控制台运行总览：连接状态、素材、草稿和 API 状态](docs/images/console-overview.png)
+![微信公众号控制台：把敏感凭据留在服务器](docs/images/social/server-showcase.png)
 
 部署在服务器上的多用户微信公众号控制台：加密托管 AppSecret，隔离用户、公众号、素材与草稿记录，并向 Codex 提供受控的图片上传和草稿写入接口。浏览器与 AI 客户端都无法读取 AppSecret。
 
@@ -19,7 +19,17 @@
 
 ![从文章内容经 Article Designer 和 Console Server 进入微信公众号草稿箱的完整流程](docs/images/project-flow.svg)
 
+## 给创作者的价值
+
+![普通用户只需提供内容与目标，预览并确认后安全写入草稿箱](docs/images/social/creator-value.png)
+
 ## 真实控制台
+
+### 运行总览
+
+![微信公众号控制台运行总览：连接状态、素材、草稿和 API 状态](docs/images/console-overview.png)
+
+### API 接入
 
 ![API 接入界面：默认隐藏 Skill 配置，列出图片、草稿与临时图片接口](docs/images/console-api.png)
 
