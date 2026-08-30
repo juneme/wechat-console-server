@@ -60,6 +60,54 @@ def test_asset_store_closes_connections_and_deletes_rows(tmp_path: Path) -> None
     assert not database_path.exists()
 
 
+def test_v4_replaces_legacy_service_keys_with_hashed_client_tokens(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "v3.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE service_credentials (
+                id INTEGER PRIMARY KEY,
+                ai_api_key_ciphertext TEXT NOT NULL,
+                publish_api_key_ciphertext TEXT NOT NULL,
+                temp_api_key_ciphertext TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("PRAGMA user_version = 3")
+
+    store = AssetStore(database_path)
+    store.initialize()
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    with sqlite3.connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO users (username, password_hash, role, created_at, updated_at)
+            VALUES ('admin', 'password-hash', 'admin', ?, ?)
+            """,
+            (now, now),
+        )
+        user_id = int(cursor.lastrowid)
+    store.replace_client_token(token_hash="a" * 64, user_id=user_id)
+    assert store.get_client_token("a" * 64) is not None
+    store.replace_client_token(token_hash="b" * 64, user_id=user_id)
+    assert store.get_client_token("a" * 64) is None
+    assert store.get_client_token("b" * 64) is not None
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert "service_credentials" not in tables
+    assert "client_tokens" in tables
+
+
 def test_legacy_database_is_backed_up_and_versioned(tmp_path: Path) -> None:
     database_path = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(database_path) as connection:

@@ -10,7 +10,6 @@ import sqlite3
 import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -62,6 +61,11 @@ REGISTRATION_IP_LIMIT = 5
 REGISTRATION_GLOBAL_LIMIT = 50
 REGISTRATION_WINDOW_SECONDS = 60 * 60
 SETUP_TOKEN_FILENAME = ".wechat-setup-token"
+PAIRING_CODE_TTL_SECONDS = 60
+PAIRING_CODE_LENGTH = 8
+PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+PAIRING_FAILURE_LIMIT = 10
+PAIRING_FAILURE_WINDOW_SECONDS = 5 * 60
 _login_failure_buckets: dict[str, deque[float]] = {}
 _registration_buckets: dict[str, deque[float]] = {}
 _login_failure_lock = Lock()
@@ -116,8 +120,84 @@ class DraftArticleRequest(BaseModel):
     only_fans_can_comment: Literal[0, 1] = 0
 
 
+class DraftArticleUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=32)
+    author: str | None = Field(default=None, max_length=16)
+    digest: str | None = Field(default=None, max_length=120)
+    content: str | None = Field(default=None, min_length=1, max_length=19_999)
+    content_source_url: str | None = Field(default=None, max_length=1024)
+    thumb_media_id: str | None = Field(default=None, min_length=1, max_length=256)
+    need_open_comment: Literal[0, 1] | None = None
+    only_fans_can_comment: Literal[0, 1] | None = None
+
+
+class PairingCodeExchange(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+
+
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
+
+
+def _pairing_code_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("ascii")).hexdigest()
+
+
+def _normalize_pairing_code(code: str) -> str:
+    return code.replace("-", "").replace(" ", "").upper()
+
+
+def _prune_pairing_state(app_state: object, now: float) -> None:
+    expired = [
+        code_hash
+        for code_hash, item in app_state.draft_pairing_codes.items()
+        if item["expires_at"] <= now
+    ]
+    for code_hash in expired:
+        app_state.draft_pairing_codes.pop(code_hash, None)
+
+    cutoff = now - PAIRING_FAILURE_WINDOW_SECONDS
+    empty_keys = []
+    for client_key, bucket in app_state.pairing_failure_buckets.items():
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if not bucket:
+            empty_keys.append(client_key)
+    for client_key in empty_keys:
+        app_state.pairing_failure_buckets.pop(client_key, None)
+
+
+def _pairing_client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _redeem_pairing_code(request: Request, code: str) -> int:
+    normalized = _normalize_pairing_code(code)
+    now = time.monotonic()
+    app_state = request.app.state
+    client_key = _pairing_client_key(request)
+    with app_state.draft_pairing_lock:
+        _prune_pairing_state(app_state, now)
+        failures = app_state.pairing_failure_buckets.setdefault(client_key, deque())
+        if len(failures) >= PAIRING_FAILURE_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail="验证码尝试次数过多，请稍后再试",
+                headers={"Retry-After": str(PAIRING_FAILURE_WINDOW_SECONDS)},
+            )
+        valid_format = len(normalized) == PAIRING_CODE_LENGTH and all(
+            character in PAIRING_CODE_ALPHABET for character in normalized
+        )
+        item = (
+            app_state.draft_pairing_codes.pop(_pairing_code_hash(normalized), None)
+            if valid_format
+            else None
+        )
+        if item is None:
+            failures.append(now)
+            raise HTTPException(status_code=401, detail="验证码无效、已过期或已使用")
+        app_state.pairing_failure_buckets.pop(client_key, None)
+        return int(item["user_id"])
 
 
 def _login_rate_keys(request: Request, username: str) -> tuple[str, str]:
@@ -284,86 +364,29 @@ def _require_ajax(request: Request) -> None:
         )
 
 
-def _require_temp_api_key(
+def _require_client_token(
     request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(bearer_security)
     ],
-    settings: Annotated[Settings, Depends(_settings)],
 ) -> str:
-    if not settings.temp_api_configured:
-        raise HTTPException(status_code=503, detail="TEMP_API_KEY 尚未配置")
-    valid = (
-        credentials is not None
-        and credentials.scheme.lower() == "bearer"
-        and secrets.compare_digest(credentials.credentials, settings.temp_api_key)
-    )
-    if not valid:
+    if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="缺少或无效的客户端令牌",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    admin = request.app.state.store.get_admin_user()
-    if admin is None:
-        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
-    request.state.api_user_id = int(admin["id"])
-    return "temp-api"
-
-
-def _require_ai_api_key(
-    request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(bearer_security)
-    ],
-    settings: Annotated[Settings, Depends(_settings)],
-) -> str:
-    if not settings.ai_api_configured:
-        raise HTTPException(status_code=503, detail="AI_API_KEY 尚未配置")
-    valid = (
-        credentials is not None
-        and credentials.scheme.lower() == "bearer"
-        and secrets.compare_digest(credentials.credentials, settings.ai_api_key)
-    )
-    if not valid:
+    token_hash = hashlib.sha256(credentials.credentials.encode("utf-8")).hexdigest()
+    token = request.app.state.store.get_client_token(token_hash)
+    if token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="客户端令牌无效，请使用新的验证码重新配对",
             headers={"WWW-Authenticate": "Bearer"},
         )
     request.state.api_key_verified = True
-    admin = request.app.state.store.get_admin_user()
-    if admin is None:
-        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
-    request.state.api_user_id = int(admin["id"])
-    return "ai-api"
-
-
-def _require_publish_api_key(
-    request: Request,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(bearer_security)
-    ],
-    settings: Annotated[Settings, Depends(_settings)],
-) -> str:
-    if not settings.publish_api_configured:
-        raise HTTPException(status_code=503, detail="PUBLISH_API_KEY 尚未配置")
-    valid = (
-        credentials is not None
-        and credentials.scheme.lower() == "bearer"
-        and secrets.compare_digest(credentials.credentials, settings.publish_api_key)
-    )
-    if not valid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    admin = request.app.state.store.get_admin_user()
-    if admin is None:
-        raise HTTPException(status_code=503, detail="管理员账号尚未初始化")
-    request.state.api_user_id = int(admin["id"])
-    return "publish-api"
+    request.state.api_user_id = int(token["user_id"])
+    return "client-token"
 
 
 def _ai_upload_result(result: dict) -> dict:
@@ -715,12 +738,118 @@ def _public_draft(
     return result
 
 
+def _draft_article_data(source: dict) -> dict:
+    return {
+        "title": source.get("title") or "",
+        "author": source.get("author") or "",
+        "digest": source.get("digest") or "",
+        "content": source.get("content") or "",
+        "content_source_url": source.get("content_source_url") or "",
+        "thumb_media_id": source.get("thumb_media_id") or "",
+        "need_open_comment": int(source.get("need_open_comment") or 0),
+        "only_fans_can_comment": int(source.get("only_fans_can_comment") or 0),
+    }
+
+
+def _draft_content_hash(article_data: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            article_data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _wechat_draft_article(
+    article_data: dict,
+    *,
+    preserve_from: dict | None = None,
+    include_empty_optional: bool = False,
+) -> dict:
+    article = {
+        "article_type": "news",
+        "title": article_data["title"],
+        "content": article_data["content"],
+        "thumb_media_id": article_data["thumb_media_id"],
+        "need_open_comment": article_data["need_open_comment"],
+        "only_fans_can_comment": article_data["only_fans_can_comment"],
+    }
+    if preserve_from:
+        for key in (
+            "show_cover_pic",
+            "pic_crop_235_1",
+            "pic_crop_1_1",
+            "image_info",
+            "product_info",
+        ):
+            if key in preserve_from:
+                article[key] = preserve_from[key]
+    for key in ("author", "digest", "content_source_url"):
+        if article_data[key] or include_empty_optional:
+            article[key] = article_data[key]
+    return article
+
+
+def _first_remote_draft_article(payload: dict) -> dict:
+    news_items = payload.get("news_item")
+    if not isinstance(news_items, list):
+        content = payload.get("content")
+        news_items = content.get("news_item") if isinstance(content, dict) else None
+    if not news_items or not isinstance(news_items[0], dict):
+        raise HTTPException(status_code=502, detail="微信草稿未返回文章内容")
+    return news_items[0]
+
+
+async def _get_remote_draft_or_404(
+    client: WechatClient, media_id: str
+) -> dict:
+    try:
+        return await client.get_draft(media_id)
+    except WechatAPIError as exc:
+        if exc.errcode == 40007:
+            raise HTTPException(status_code=404, detail="微信草稿不存在") from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def _update_remote_draft_article(
+    *,
+    client: WechatClient,
+    media_id: str,
+    changes: dict,
+) -> tuple[dict, dict]:
+    remote = await _get_remote_draft_or_404(client, media_id)
+    remote_article = _first_remote_draft_article(remote)
+    if remote_article.get("article_type", "news") != "news":
+        raise HTTPException(status_code=409, detail="当前仅支持修改普通图文草稿")
+    article_data = _draft_article_data(remote_article)
+    article_data.update(changes)
+    try:
+        validation = validate_article_content(article_data["content"])
+    except ArticleValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        await client.update_draft(
+            media_id,
+            _wechat_draft_article(
+                article_data,
+                preserve_from=remote_article,
+                include_empty_optional=True,
+            ),
+            index=0,
+        )
+    except WechatAPIError as exc:
+        if exc.errcode == 40007:
+            raise HTTPException(status_code=404, detail="微信草稿不存在") from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return article_data, validation
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.validate_runtime()
     store = AssetStore(settings.database_path)
     store.initialize()
+    store.purge_deleted_draft_jobs()
     store.delete_expired_admin_sessions()
     cipher = CredentialCipher.create(
         secret=settings.credentials_encryption_key,
@@ -733,17 +862,6 @@ async def lifespan(app: FastAPI):
         store.initialize_admin_credentials(
             settings.admin_username or "admin", password_hash
         )
-    service_credentials = store.get_service_credentials()
-    if service_credentials:
-        settings = replace(
-            settings,
-            ai_api_key=settings.ai_api_key
-            or cipher.decrypt(service_credentials["ai_api_key_ciphertext"]),
-            publish_api_key=settings.publish_api_key
-            or cipher.decrypt(service_credentials["publish_api_key_ciphertext"]),
-            temp_api_key=settings.temp_api_key
-            or cipher.decrypt(service_credentials["temp_api_key_ciphertext"]),
-        )
     settings.temp_storage_path.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(
         _cleanup_expired_temporary_assets, store, settings.temp_storage_path
@@ -754,6 +872,9 @@ async def lifespan(app: FastAPI):
     app.state.http = http
     app.state.credential_cipher = cipher
     app.state.temporary_storage_lock = asyncio.Lock()
+    app.state.draft_pairing_codes = {}
+    app.state.draft_pairing_lock = Lock()
+    app.state.pairing_failure_buckets = {}
     if store.get_admin_credentials() is None:
         app.state.setup_token = _load_or_create_setup_token(settings.database_path)
     else:
@@ -783,7 +904,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="微信公众号控制台",
+    title="云浪控制台",
     version=__version__,
     docs_url=None,
     redoc_url=None,
@@ -833,26 +954,10 @@ async def initial_setup(
         raise HTTPException(status_code=422, detail="不能使用示例占位密码")
 
     password_hash = await asyncio.to_thread(hash_password, payload.password)
-    service_keys = {
-        "ai_api_key": secrets.token_urlsafe(32),
-        "publish_api_key": secrets.token_urlsafe(32),
-        "temp_api_key": secrets.token_urlsafe(32),
-    }
-    cipher: CredentialCipher = request.app.state.credential_cipher
-    created = store.initialize_console_credentials(
-        username=username,
-        password_hash=password_hash,
-        ai_api_key_ciphertext=cipher.encrypt(service_keys["ai_api_key"]),
-        publish_api_key_ciphertext=cipher.encrypt(service_keys["publish_api_key"]),
-        temp_api_key_ciphertext=cipher.encrypt(service_keys["temp_api_key"]),
-    )
+    created = store.initialize_admin_credentials(username, password_hash)
     if not created:
         raise HTTPException(status_code=409, detail="控制台已经完成初始化")
 
-    request.app.state.settings = replace(
-        request.app.state.settings,
-        **service_keys,
-    )
     user = store.get_user_by_username(username)
     if user is None:
         raise HTTPException(status_code=500, detail="管理员初始化失败")
@@ -990,9 +1095,7 @@ async def api_status(
         "app_id_suffix": account["app_id_suffix"],
         "account": account,
         "temporary_ready": True,
-        "temporary_api_ready": settings.temp_api_configured,
-        "image_api_ready": settings.ai_api_configured,
-        "publish_api_ready": settings.publish_api_configured,
+        "client_api_ready": True,
         "temporary_retention_days": settings.temp_retention_days,
         "limits": {
             "article_bytes": settings.article_max_bytes,
@@ -1002,25 +1105,73 @@ async def api_status(
     }
 
 
-@app.post("/api/skill-client-config")
-async def skill_client_config(
+@app.post("/api/pairing-code")
+async def create_pairing_code(
     request: Request,
     response: Response,
-    _: Annotated[dict, Depends(_require_admin)],
+    user: Annotated[dict, Depends(_require_admin)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     _require_ajax(request)
+    raw_code = "".join(
+        secrets.choice(PAIRING_CODE_ALPHABET) for _ in range(PAIRING_CODE_LENGTH)
+    )
+    now = time.monotonic()
+    expires_at = datetime.now(UTC) + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
+    app_state = request.app.state
+    with app_state.draft_pairing_lock:
+        _prune_pairing_state(app_state, now)
+        for code_hash, item in list(app_state.draft_pairing_codes.items()):
+            if item["user_id"] == int(user["id"]):
+                app_state.draft_pairing_codes.pop(code_hash, None)
+        app_state.draft_pairing_codes[_pairing_code_hash(raw_code)] = {
+            "expires_at": now + PAIRING_CODE_TTL_SECONDS,
+            "user_id": int(user["id"]),
+        }
+
+    console_url = settings.public_base_url or str(request.base_url).rstrip("/")
+    secure = request.url.scheme == "https"
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
-    console_url = settings.public_base_url or str(request.base_url).rstrip("/")
     return {
-        "configured": settings.ai_api_configured
-        and settings.publish_api_configured,
-        "values": {
-            "WECHAT_CONSOLE_URL": console_url,
-            "WECHAT_IMAGE_API_KEY": settings.ai_api_key,
-            "WECHAT_PUBLISH_API_KEY": settings.publish_api_key,
-        },
+        "code": f"{raw_code[:4]}-{raw_code[4:]}",
+        "expires_in": PAIRING_CODE_TTL_SECONDS,
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "exchange_url": f"{console_url}/api/v1/pairing/exchange",
+        "transport_secure": secure,
+        "warning": None
+        if secure
+        else "当前使用 HTTP，验证码和客户端令牌将以明文传输，建议配置 HTTPS。",
+    }
+
+
+@app.post("/api/v1/pairing/exchange")
+async def exchange_pairing_code(
+    payload: PairingCodeExchange,
+    request: Request,
+    response: Response,
+    settings: Annotated[Settings, Depends(_settings)],
+) -> dict:
+    user_id = _redeem_pairing_code(request, payload.code)
+    store: AssetStore = request.app.state.store
+    user = store.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="验证码所属用户不存在")
+    client_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(client_token.encode("utf-8")).hexdigest()
+    store.replace_client_token(token_hash=token_hash, user_id=user_id)
+    console_url = settings.public_base_url or str(request.base_url).rstrip("/")
+    secure = request.url.scheme == "https"
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    return {
+        "console_url": console_url,
+        "client_token": client_token,
+        "active_account_id": user.get("active_account_id"),
+        "transport_secure": secure,
+        "warning": None
+        if secure
+        else "当前使用 HTTP，客户端令牌已通过明文连接返回，请勿在不可信网络中使用。",
     }
 
 
@@ -1151,9 +1302,7 @@ async def overview(
         "counts": counts,
         "apis": {
             "wechat": bool(account and account.get("app_secret_ciphertext")),
-            "images": settings.ai_api_configured,
-            "drafts": settings.publish_api_configured,
-            "temporary": settings.temp_api_configured,
+            "client": True,
         },
         "recent_drafts": [
             _public_draft(row, current_user_id=user_id)
@@ -1237,19 +1386,14 @@ async def run_diagnostics(
         }
     )
 
-    for check_id, label, configured in (
-        ("image_api", "图片 API Key", settings.ai_api_configured),
-        ("publish_api", "草稿 API Key", settings.publish_api_configured),
-        ("temporary_api", "临时图片 API Key", settings.temp_api_configured),
-    ):
-        checks.append(
-            {
-                "id": check_id,
-                "label": label,
-                "status": "ok" if configured else "warning",
-                "detail": "已配置" if configured else "未配置",
-            }
-        )
+    checks.append(
+        {
+            "id": "client_api",
+            "label": "验证码配对",
+            "status": "ok",
+            "detail": "可签发统一客户端令牌",
+        }
+    )
     checks.append(
         {
             "id": "public_url",
@@ -1260,10 +1404,7 @@ async def run_diagnostics(
     )
     return {
         "version": __version__,
-        "ready": database_ok
-        and wechat_ok
-        and settings.ai_api_configured
-        and settings.publish_api_configured,
+        "ready": database_ok and wechat_ok,
         "checks": checks,
         "migration_backup": (
             store.last_migration_backup.name if store.last_migration_backup else None
@@ -1476,7 +1617,13 @@ async def _delete_asset_item(
         await asyncio.to_thread(
             _delete_temporary_row, store, row, settings.temp_storage_path
         )
-        return {"kind": item.kind, "id": item.id, "remote_deleted": False}
+        return {
+            "kind": item.kind,
+            "id": item.id,
+            "local_deleted": True,
+            "remote_deleted": False,
+            "remote_delete_supported": False,
+        }
 
     row = await asyncio.to_thread(store.get_asset, item.id, user_id=user_id)
     if not row:
@@ -1485,18 +1632,30 @@ async def _delete_asset_item(
     if not active or int(row.get("account_id") or 0) != int(active["id"]):
         return {"kind": item.kind, "id": item.id, "missing": True}
     remote_deleted = False
+    remote_missing = False
     if row.get("media_id"):
         client = _require_wechat_config(request)
-        await client.delete_permanent_material(row["media_id"])
-        remote_deleted = True
+        try:
+            await client.delete_permanent_material(row["media_id"])
+            remote_deleted = True
+        except WechatAPIError as exc:
+            if exc.errcode == 40007:
+                remote_missing = True
+            else:
+                raise
     await asyncio.to_thread(store.delete_asset, item.id, user_id=user_id)
     result = {
         "kind": item.kind,
         "id": item.id,
+        "local_deleted": True,
         "remote_deleted": remote_deleted,
+        "remote_missing": remote_missing,
+        "remote_delete_supported": bool(row.get("media_id")),
     }
     if row.get("article_url"):
-        result["warning"] = "正文图片 URL 无微信删除接口，已删除本地记录"
+        result["warning"] = (
+            "正文图片 URL 无微信删除接口；已删除控制台记录，原 URL 可能仍可访问"
+        )
     return result
 
 
@@ -1584,7 +1743,7 @@ async def delete_all_assets(
 async def api_upload_wechat_images(
     request: Request,
     images: Annotated[list[UploadFile], File(description="重复 images 字段可批量上传")],
-    _: Annotated[str, Depends(_require_ai_api_key)],
+    _: Annotated[str, Depends(_require_client_token)],
     settings: Annotated[Settings, Depends(_settings)],
     mode: Annotated[Literal["article", "material", "both"], Form()] = "material",
 ) -> dict:
@@ -1610,6 +1769,54 @@ async def api_upload_wechat_images(
     }
 
 
+def _publish_api_draft_context(
+    request: Request, draft_id: int
+) -> tuple[AssetStore, dict, dict]:
+    store: AssetStore = request.app.state.store
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=True)
+    assert account is not None
+    account_id = int(account["id"])
+    row = store.get_draft_job(draft_id, user_id=user_id)
+    if not row or int(row.get("account_id") or 0) != account_id:
+        raise HTTPException(status_code=404, detail="草稿记录不存在")
+    return store, row, account
+
+
+async def _delete_draft_record(
+    *, request: Request, store: AssetStore, row: dict, account: dict
+) -> dict:
+    remote_deleted = False
+    remote_missing = False
+    media_id = row.get("media_id")
+    if media_id and row.get("status") != "deleted":
+        client = _wechat_client_for_account(request, account)
+        try:
+            await client.delete_draft(media_id)
+            remote_deleted = True
+        except WechatAPIError as exc:
+            if exc.errcode == 40007:
+                remote_missing = True
+            else:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+    deleted = store.delete_draft_job(
+        int(row["id"]),
+        user_id=int(row["user_id"]),
+        account_id=int(row["account_id"]),
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="草稿记录不存在")
+    return {
+        "deleted": True,
+        "id": int(row["id"]),
+        "request_id": row["request_id"],
+        "media_id": media_id,
+        "remote_deleted": remote_deleted,
+        "remote_missing": remote_missing,
+        "local_deleted": True,
+    }
+
+
 @app.post(
     "/api/v1/wechat-drafts",
     status_code=status.HTTP_201_CREATED,
@@ -1619,7 +1826,7 @@ async def api_create_wechat_draft(
     payload: DraftArticleRequest,
     request: Request,
     response: Response,
-    _: Annotated[str, Depends(_require_publish_api_key)],
+    _: Annotated[str, Depends(_require_client_token)],
 ) -> dict:
     client = _require_wechat_config(request)
     user_id = _request_user_id(request)
@@ -1631,12 +1838,8 @@ async def api_create_wechat_draft(
     except ArticleValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    article_data = payload.model_dump(exclude={"request_id"})
-    content_hash = hashlib.sha256(
-        json.dumps(
-            article_data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
+    article_data = _draft_article_data(payload.model_dump(exclude={"request_id"}))
+    content_hash = _draft_content_hash(article_data)
     store: AssetStore = request.app.state.store
     existing = store.get_draft_job_by_request_id(
         payload.request_id, user_id=user_id, account_id=account_id
@@ -1709,20 +1912,7 @@ async def api_create_wechat_draft(
             only_fans_can_comment=payload.only_fans_can_comment,
         )
 
-    article = {
-        "article_type": "news",
-        "title": payload.title,
-        "content": payload.content,
-        "thumb_media_id": payload.thumb_media_id,
-        "need_open_comment": payload.need_open_comment,
-        "only_fans_can_comment": payload.only_fans_can_comment,
-    }
-    if payload.author:
-        article["author"] = payload.author
-    if payload.digest:
-        article["digest"] = payload.digest
-    if payload.content_source_url:
-        article["content_source_url"] = payload.content_source_url
+    article = _wechat_draft_article(article_data)
     try:
         media_id = await client.create_draft(article)
     except WechatAPIError as exc:
@@ -1740,6 +1930,285 @@ async def api_create_wechat_draft(
         "cached": False,
         "validation": validation,
     }
+
+
+@app.get(
+    "/api/v1/wechat-drafts",
+    summary="列出当前管理员公众号的草稿任务",
+)
+async def api_list_wechat_drafts(
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    store: AssetStore = request.app.state.store
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=True)
+    assert account is not None
+    account_id = int(account["id"])
+    items = [
+        _public_draft(row, current_user_id=user_id)
+        for row in store.list_draft_jobs(
+            limit=limit,
+            offset=offset,
+            user_id=user_id,
+            account_id=account_id,
+        )
+    ]
+    total = store.count_draft_jobs(user_id=user_id, account_id=account_id)
+    safe_offset = max(offset, 0)
+    return {
+        "items": items,
+        "count": total,
+        "limit": min(max(limit, 1), 1000),
+        "offset": safe_offset,
+        "has_more": safe_offset + len(items) < total,
+    }
+
+
+@app.get(
+    "/api/v1/wechat-drafts/wechat-box",
+    summary="直接列出微信公众号草稿箱",
+)
+async def api_list_remote_wechat_drafts(
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+    offset: int = 0,
+    count: int = 20,
+    no_content: bool = False,
+) -> dict:
+    client = _require_wechat_config(request)
+    safe_offset = max(offset, 0)
+    safe_count = min(max(count, 1), 20)
+    try:
+        result = await client.list_drafts(
+            offset=safe_offset,
+            count=safe_count,
+            no_content=no_content,
+        )
+    except WechatAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    items = result.get("item")
+    if not isinstance(items, list):
+        items = []
+    return {
+        "items": items,
+        "count": int(result.get("item_count") or len(items)),
+        "total_count": int(result.get("total_count") or 0),
+        "offset": safe_offset,
+        "limit": safe_count,
+        "has_more": safe_offset + len(items) < int(result.get("total_count") or 0),
+    }
+
+
+@app.get(
+    "/api/v1/wechat-drafts/wechat-box/{media_id}",
+    summary="按 media_id 读取微信草稿",
+)
+async def api_get_remote_wechat_draft(
+    media_id: str,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    client = _require_wechat_config(request)
+    remote = await _get_remote_draft_or_404(client, media_id)
+    return {
+        "media_id": media_id,
+        "article": _first_remote_draft_article(remote),
+        "remote": remote,
+    }
+
+
+@app.put(
+    "/api/v1/wechat-drafts/wechat-box/{media_id}",
+    summary="按 media_id 修改微信草稿",
+)
+async def api_update_remote_wechat_draft(
+    media_id: str,
+    payload: DraftArticleUpdate,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="至少提供一个需要修改的字段")
+    if any(value is None for value in changes.values()):
+        raise HTTPException(status_code=422, detail="修改字段不能为 null")
+
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=True)
+    assert account is not None
+    account_id = int(account["id"])
+    client = _wechat_client_for_account(request, account)
+    article_data, validation = await _update_remote_draft_article(
+        client=client,
+        media_id=media_id,
+        changes=changes,
+    )
+
+    store: AssetStore = request.app.state.store
+    local = store.get_draft_job_by_media_id(
+        media_id, user_id=user_id, account_id=account_id
+    )
+    updated = None
+    if local:
+        updated = store.update_draft_content(
+            int(local["id"]),
+            content_hash=_draft_content_hash(article_data),
+            title=article_data["title"],
+            author=article_data["author"],
+            digest=article_data["digest"],
+            content=article_data["content"],
+            content_source_url=article_data["content_source_url"],
+            thumb_media_id=article_data["thumb_media_id"],
+            need_open_comment=article_data["need_open_comment"],
+            only_fans_can_comment=article_data["only_fans_can_comment"],
+        )
+    return {
+        "media_id": media_id,
+        "article": article_data,
+        "draft": _public_draft(updated, include_content=True) if updated else None,
+        "remote_updated": True,
+        "validation": validation,
+    }
+
+
+@app.delete(
+    "/api/v1/wechat-drafts/wechat-box/{media_id}",
+    summary="按 media_id 删除微信草稿",
+)
+async def api_delete_remote_wechat_draft(
+    media_id: str,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    user_id = _request_user_id(request)
+    account = _request_account(request, required=True)
+    assert account is not None
+    account_id = int(account["id"])
+    client = _wechat_client_for_account(request, account)
+    remote_deleted = False
+    remote_missing = False
+    try:
+        await client.delete_draft(media_id)
+        remote_deleted = True
+    except WechatAPIError as exc:
+        if exc.errcode == 40007:
+            remote_missing = True
+        else:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    store: AssetStore = request.app.state.store
+    local = store.get_draft_job_by_media_id(
+        media_id, user_id=user_id, account_id=account_id
+    )
+    local_deleted = False
+    if local:
+        local_deleted = store.delete_draft_job(
+            int(local["id"]), user_id=user_id, account_id=account_id
+        )
+        if not local_deleted:
+            raise HTTPException(status_code=409, detail="本地草稿记录删除失败")
+    return {
+        "deleted": True,
+        "media_id": media_id,
+        "remote_deleted": remote_deleted,
+        "remote_missing": remote_missing,
+        "local_deleted": local_deleted,
+    }
+
+
+@app.get(
+    "/api/v1/wechat-drafts/{draft_id}",
+    summary="读取草稿任务并核对微信草稿箱",
+)
+async def api_get_wechat_draft(
+    draft_id: int,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    _, row, account = _publish_api_draft_context(request, draft_id)
+    remote = None
+    remote_checked = False
+    remote_exists: bool | None = None
+    if row.get("media_id") and row.get("status") == "created":
+        remote_checked = True
+        client = _wechat_client_for_account(request, account)
+        try:
+            remote = await client.get_draft(row["media_id"])
+            remote_exists = True
+        except WechatAPIError as exc:
+            if exc.errcode == 40007:
+                remote_exists = False
+            else:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "draft": _public_draft(row, include_content=True),
+        "remote_checked": remote_checked,
+        "remote_exists": remote_exists,
+        "remote": remote,
+    }
+
+
+@app.put(
+    "/api/v1/wechat-drafts/{draft_id}",
+    summary="修改微信公众号草稿",
+)
+async def api_update_wechat_draft(
+    draft_id: int,
+    payload: DraftArticleUpdate,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    store, row, account = _publish_api_draft_context(request, draft_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="至少提供一个需要修改的字段")
+    if any(value is None for value in changes.values()):
+        raise HTTPException(status_code=422, detail="修改字段不能为 null")
+    if row.get("status") != "created" or not row.get("media_id"):
+        raise HTTPException(status_code=409, detail="只有已写入微信的草稿可以修改")
+
+    client = _wechat_client_for_account(request, account)
+    article_data, validation = await _update_remote_draft_article(
+        client=client,
+        media_id=row["media_id"],
+        changes=changes,
+    )
+
+    updated = store.update_draft_content(
+        draft_id,
+        content_hash=_draft_content_hash(article_data),
+        title=article_data["title"],
+        author=article_data["author"],
+        digest=article_data["digest"],
+        content=article_data["content"],
+        content_source_url=article_data["content_source_url"],
+        thumb_media_id=article_data["thumb_media_id"],
+        need_open_comment=article_data["need_open_comment"],
+        only_fans_can_comment=article_data["only_fans_can_comment"],
+    )
+    return {
+        "draft": _public_draft(updated, include_content=True),
+        "remote_updated": True,
+        "validation": validation,
+    }
+
+
+@app.delete(
+    "/api/v1/wechat-drafts/{draft_id}",
+    summary="删除微信公众号草稿及本地任务记录",
+)
+async def api_delete_wechat_draft(
+    draft_id: int,
+    request: Request,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    store, row, account = _publish_api_draft_context(request, draft_id)
+    return await _delete_draft_record(
+        request=request, store=store, row=row, account=account
+    )
 
 
 @app.post(
@@ -1830,14 +2299,9 @@ async def delete_draft(
     )
     if account is None:
         raise HTTPException(status_code=404, detail="草稿记录不存在")
-    if row.get("media_id") and row["status"] != "deleted":
-        client = _wechat_client_for_account(request, account)
-        try:
-            await client.delete_draft(row["media_id"])
-        except WechatAPIError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-    updated = store.update_draft_job(draft_id, status="deleted")
-    return {"draft": _public_draft(updated, current_user_id=int(user["id"]))}
+    return await _delete_draft_record(
+        request=request, store=store, row=row, account=account
+    )
 
 
 @app.post(
@@ -1848,7 +2312,7 @@ async def delete_draft(
 async def api_upload_temporary_images(
     request: Request,
     images: Annotated[list[UploadFile], File(description="重复 images 字段可批量上传")],
-    _: Annotated[str, Depends(_require_temp_api_key)],
+    _: Annotated[str, Depends(_require_client_token)],
     settings: Annotated[Settings, Depends(_settings)],
 ) -> dict:
     if len(images) > 100:
@@ -1904,7 +2368,7 @@ async def api_upload_temporary_images(
 )
 async def api_list_temporary_images(
     request: Request,
-    _: Annotated[str, Depends(_require_temp_api_key)],
+    _: Annotated[str, Depends(_require_client_token)],
     settings: Annotated[Settings, Depends(_settings)],
     limit: int = 500,
 ) -> dict:

@@ -15,8 +15,10 @@ const state = {
   uploading: false,
   deleting: false,
   loadingAssets: true,
-  skillConfig: null,
-  skillConfigVisible: false,
+  pairingCode: null,
+  pairingExpiresAt: 0,
+  pairingExchangeUrl: "",
+  pairingWarning: "",
 };
 
 const views = {
@@ -49,15 +51,15 @@ const els = {
   accountAppId: $("#accountAppId"), accountSecret: $("#accountSecret"), accountSource: $("#accountSource"),
   accountMeta: $("#accountMeta"), accountSave: $("#accountSave"), accountTest: $("#accountTest"),
   accountFormTitle: $("#accountFormTitle"), accountList: $("#accountList"), accountCount: $("#accountCount"),
-  newAccount: $("#newAccount"), adminSkillSection: $("#adminSkillSection"),
+  newAccount: $("#newAccount"), adminPairingSection: $("#adminPairingSection"),
   input: $("#fileInput"), dropZone: $("#dropZone"), queue: $("#queue"), queueSummary: $("#queueSummary"),
   clearQueue: $("#clearQueue"), startUpload: $("#startUpload"), assetTable: $("#assetTable"),
   assetCount: $("#assetCount"), copyUrls: $("#copyUrls"), copyJson: $("#copyJson"), deleteSelected: $("#deleteSelected"),
   draftTable: $("#draftTable"), draftCount: $("#draftCount"), refreshDrafts: $("#refreshDrafts"), loadMoreDrafts: $("#loadMoreDrafts"),
   apiEndpoints: $("#apiEndpoints"), runDiagnostics: $("#runDiagnostics"), diagnosticResults: $("#diagnosticResults"),
-  toggleSkillConfig: $("#toggleSkillConfig"), copySkillConfig: $("#copySkillConfig"),
-  skillConfigPanel: $("#skillConfigPanel"), skillConfigHint: $("#skillConfigHint"),
-  skillConsoleUrl: $("#skillConsoleUrl"), skillImageKey: $("#skillImageKey"), skillPublishKey: $("#skillPublishKey"),
+  generatePairingCode: $("#generatePairingCode"), copyPairingCode: $("#copyPairingCode"),
+  pairingCode: $("#pairingCode"), pairingCountdown: $("#pairingCountdown"),
+  pairingHint: $("#pairingHint"), pairingExchangeUrl: $("#pairingExchangeUrl"),
   confirmDialog: $("#confirmDialog"), confirmTitle: $("#confirmTitle"),
   confirmMessage: $("#confirmMessage"), confirmAction: $("#confirmAction"), toast: $("#toast"),
   passwordForm: $("#passwordForm"), currentPassword: $("#currentPassword"), newPassword: $("#newPassword"),
@@ -85,6 +87,7 @@ function formatDate(value) {
 }
 
 let toastTimer;
+let pairingTimer;
 function toast(message) {
   els.toast.textContent = message;
   els.toast.classList.add("show");
@@ -130,8 +133,11 @@ function resetWorkspaceState() {
   state.drafts = [];
   state.draftTotal = 0;
   state.draftHasMore = false;
-  state.skillConfig = null;
-  state.skillConfigVisible = false;
+  state.pairingCode = null;
+  state.pairingExpiresAt = 0;
+  state.pairingExchangeUrl = "";
+  state.pairingWarning = "";
+  clearInterval(pairingTimer);
   state.files = [];
   state.assets = [];
   state.selected = new Set();
@@ -157,7 +163,7 @@ function resetWorkspaceState() {
   renderDrafts();
   renderQueue();
   renderAssets();
-  renderSkillConfig();
+  renderPairingCode();
 }
 
 function showLogin() {
@@ -205,7 +211,7 @@ function showWorkspace(user) {
   els.loginForm.reset();
   els.registerForm.reset();
   els.setupForm.reset();
-  els.adminSkillSection.hidden = user.role !== "admin";
+  els.adminPairingSection.hidden = user.role !== "admin";
   showView(location.hash.slice(1) || "overview", false);
 }
 
@@ -270,9 +276,7 @@ function renderOverview() {
   els.metricDraftFailures.textContent = draftIssues ? `${draftIssues} 个异常任务` : "无异常任务";
   els.overviewApis.innerHTML = [
     capability("微信平台", data.apis.wechat, data.apis.wechat ? "凭据已加载" : "等待公众号配置"),
-    capability("图片接口", data.apis.images, data.apis.images ? "AI_API_KEY 已启用" : "AI_API_KEY 未配置"),
-    capability("草稿接口", data.apis.drafts, data.apis.drafts ? "PUBLISH_API_KEY 已启用" : "PUBLISH_API_KEY 未配置"),
-    capability("临时图片", data.apis.temporary, data.apis.temporary ? "TEMP_API_KEY 已启用" : "TEMP_API_KEY 未配置"),
+    capability("AI 客户端", data.apis.client, "验证码配对后统一访问图片与草稿接口"),
   ].join("");
   els.recentDrafts.innerHTML = data.recent_drafts.length ? data.recent_drafts.map(draft => {
     const [label, className] = draftStatus(draft.status);
@@ -447,68 +451,57 @@ async function deleteDraftRecord(draft) {
 function renderApiEndpoints() {
   if (!state.status) return;
   const endpoints = [
-    ["POST", "/api/v1/wechat-images", "图片上传", state.status.image_api_ready, "AI_API_KEY"],
-    ["POST", "/api/v1/wechat-drafts", "写入草稿", state.status.publish_api_ready, "PUBLISH_API_KEY"],
-    ["POST", "/api/v1/temp-images", "临时图片", state.status.temporary_api_ready, "TEMP_API_KEY"],
+    ["POST", "/api/v1/wechat-images", "图片上传", state.status.client_api_ready, "配对令牌"],
+    ["POST", "/api/v1/wechat-drafts", "写入草稿", state.status.client_api_ready, "配对令牌"],
+    ["GET", "/api/v1/wechat-drafts", "查询草稿", state.status.client_api_ready, "配对令牌"],
+    ["GET", "/api/v1/wechat-drafts/{id}", "核对草稿", state.status.client_api_ready, "配对令牌"],
+    ["PUT", "/api/v1/wechat-drafts/{id}", "修改草稿", state.status.client_api_ready, "配对令牌"],
+    ["DELETE", "/api/v1/wechat-drafts/{id}", "删除草稿", state.status.client_api_ready, "配对令牌"],
+    ["GET", "/api/v1/wechat-drafts/wechat-box", "微信草稿箱", state.status.client_api_ready, "配对令牌"],
+    ["GET", "/api/v1/wechat-drafts/wechat-box/{media_id}", "读取微信草稿", state.status.client_api_ready, "配对令牌"],
+    ["PUT", "/api/v1/wechat-drafts/wechat-box/{media_id}", "修改微信草稿", state.status.client_api_ready, "配对令牌"],
+    ["DELETE", "/api/v1/wechat-drafts/wechat-box/{media_id}", "删除微信草稿", state.status.client_api_ready, "配对令牌"],
+    ["POST", "/api/v1/pairing/exchange", "兑换客户端令牌", state.status.client_api_ready, "一次性验证码"],
+    ["POST", "/api/v1/temp-images", "临时图片", state.status.client_api_ready, "配对令牌"],
   ];
   els.apiEndpoints.innerHTML = endpoints.map(([method, path, name, ready, key]) => `<div class="endpoint"><span class="method">${method}</span><code>${path}</code><strong>${name}</strong><span class="endpoint-key">${key}</span><b class="status-pill ${ready ? "ok" : "muted"}">${ready ? "已启用" : "未配置"}</b></div>`).join("");
 }
 
-const skillConfigFields = {
-  WECHAT_CONSOLE_URL: () => els.skillConsoleUrl,
-  WECHAT_IMAGE_API_KEY: () => els.skillImageKey,
-  WECHAT_PUBLISH_API_KEY: () => els.skillPublishKey,
-};
-
-function renderSkillConfig() {
-  const values = state.skillConfig?.values || {};
-  const loaded = Boolean(state.skillConfig);
-  const visible = loaded && state.skillConfigVisible;
-  for (const [key, getField] of Object.entries(skillConfigFields)) {
-    const field = getField();
-    const value = values[key] || "";
-    field.value = loaded ? value : (key === "WECHAT_CONSOLE_URL" ? "点击“显示配置”读取" : "");
-    field.type = key === "WECHAT_CONSOLE_URL" || visible ? "text" : "password";
-    field.placeholder = loaded && !value ? "未配置" : "";
-  }
-  els.toggleSkillConfig.textContent = visible ? "隐藏配置" : "显示配置";
-  els.copySkillConfig.disabled = !loaded || !state.skillConfig.configured;
-  document.querySelectorAll(".copy-skill-value").forEach(button => {
-    button.disabled = !loaded || !values[button.dataset.configKey];
-  });
-  els.skillConfigPanel.classList.toggle("revealed", visible);
-  if (!loaded) {
-    els.skillConfigHint.textContent = "登录管理员账号后可直接读取，无需进入服务器 .env。密钥默认隐藏且不会被浏览器缓存。";
-  } else if (!state.skillConfig.configured) {
-    els.skillConfigHint.textContent = "图片或草稿 API Key 尚未配置，请重新执行部署脚本生成后再刷新。";
-  } else {
-    els.skillConfigHint.textContent = visible ? "配置已显示。复制后请妥善保管，不要发送到聊天或提交到仓库。" : "配置已读取并隐藏，可随时再次显示或直接复制。";
-  }
+function renderPairingCode() {
+  const remaining = state.pairingExpiresAt ? Math.max(0, Math.ceil((state.pairingExpiresAt - Date.now()) / 1000)) : 0;
+  const active = Boolean(state.pairingCode && remaining > 0);
+  els.pairingCode.textContent = active ? state.pairingCode : (state.pairingCode ? "已过期" : "---- ----");
+  els.pairingCountdown.textContent = active ? `${remaining} 秒后失效` : (state.pairingCode ? "已失效" : "尚未生成");
+  els.pairingCountdown.className = `pairing-countdown ${active ? "active" : state.pairingCode ? "expired" : ""}`;
+  els.copyPairingCode.disabled = !active;
+  els.pairingExchangeUrl.textContent = state.pairingExchangeUrl || "POST /api/v1/pairing/exchange";
+  const defaultWarning = location.protocol === "https:"
+    ? "生成后手动交给 AI，验证码仅可兑换一次。"
+    : "当前为 HTTP 连接，可以使用，但验证码和令牌会明文传输，建议配置 HTTPS。";
+  els.pairingHint.textContent = state.pairingWarning || defaultWarning;
+  els.pairingHint.classList.toggle("warning", Boolean(state.pairingWarning || location.protocol !== "https:"));
+  if (state.pairingCode && !active) clearInterval(pairingTimer);
 }
 
-async function toggleSkillConfig() {
-  if (state.skillConfig) {
-    state.skillConfigVisible = !state.skillConfigVisible;
-    renderSkillConfig();
-    return;
-  }
-  els.toggleSkillConfig.disabled = true;
-  els.toggleSkillConfig.textContent = "读取中";
+async function generatePairingCode() {
+  els.generatePairingCode.disabled = true;
+  els.generatePairingCode.textContent = "生成中";
   try {
-    state.skillConfig = await api("/api/skill-client-config", { method: "POST" });
-    state.skillConfigVisible = true;
-    renderSkillConfig();
+    const result = await api("/api/pairing-code", { method: "POST" });
+    state.pairingCode = result.code;
+    state.pairingExpiresAt = Date.now() + result.expires_in * 1000;
+    state.pairingExchangeUrl = result.exchange_url;
+    state.pairingWarning = result.warning || "";
+    clearInterval(pairingTimer);
+    pairingTimer = setInterval(renderPairingCode, 250);
+    renderPairingCode();
+    toast("验证码已生成，60 秒内有效");
   } catch (error) {
-    toast(`读取配置失败：${error.message}`);
-    renderSkillConfig();
+    toast(`生成失败：${error.message}`);
   } finally {
-    els.toggleSkillConfig.disabled = false;
+    els.generatePairingCode.disabled = false;
+    els.generatePairingCode.textContent = "重新生成 1 分钟验证码";
   }
-}
-
-function skillConfigText() {
-  const values = state.skillConfig?.values || {};
-  return Object.keys(skillConfigFields).map(key => `${key}=${values[key] || ""}`).join("\n");
 }
 
 async function runDiagnostics() {
@@ -643,12 +636,20 @@ function askConfirmation(title, message, confirmText = "确认") {
 
 async function deleteRecords(assets) {
   if (!assets.length) return;
-  const confirmed = await askConfirmation("删除素材", `将删除 ${assets.length} 条记录，永久素材会同步从微信素材库删除。`, "确认删除");
+  const permanentCount = assets.filter(asset => asset.media_id).length;
+  const articleUrlCount = assets.filter(asset => asset.article_url).length;
+  const details = [`将删除 ${assets.length} 条控制台记录。`];
+  if (permanentCount) details.push(`其中 ${permanentCount} 条永久素材会同步从微信素材库删除。`);
+  if (articleUrlCount) details.push(`其中 ${articleUrlCount} 个正文图片 URL 没有微信删除接口，原 URL 可能仍可访问。`);
+  const confirmed = await askConfirmation("删除素材", details.join(""), "确认删除");
   if (!confirmed) return;
   state.deleting = true; renderAssets();
   try {
     const result = await api("/api/assets/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: assets.map(asset => ({ kind: asset.kind || "wechat", id: asset.id })) }) });
-    if (result.error_count) toast(`已删除 ${result.deleted_count} 条，${result.error_count} 条失败`); else toast(`已删除 ${result.deleted_count} 条素材`);
+    const warningCount = result.deleted.filter(item => item.warning).length;
+    if (result.error_count) toast(`已删除 ${result.deleted_count} 条，${result.error_count} 条失败`);
+    else if (warningCount) toast(`已删除 ${result.deleted_count} 条记录；${warningCount} 个正文图片 URL 无法从微信撤销`);
+    else toast(`已删除 ${result.deleted_count} 条素材`);
     state.selected = new Set();
     await Promise.all([loadAssets(), loadOverview()]);
   } catch (error) { toast(error.message); }
@@ -781,13 +782,8 @@ els.testConnection.addEventListener("click", testAccount);
 els.refreshDrafts.addEventListener("click", loadDrafts);
 els.loadMoreDrafts.addEventListener("click", () => loadDrafts({ append: true }));
 els.runDiagnostics.addEventListener("click", runDiagnostics);
-els.toggleSkillConfig.addEventListener("click", toggleSkillConfig);
-els.copySkillConfig.addEventListener("click", () => copyText(skillConfigText(), "Skill 配置已复制"));
-els.skillConfigPanel.addEventListener("click", event => {
-  const button = event.target.closest(".copy-skill-value");
-  if (!button) return;
-  copyText(state.skillConfig?.values?.[button.dataset.configKey], `${button.dataset.configKey} 已复制`);
-});
+els.generatePairingCode.addEventListener("click", generatePairingCode);
+els.copyPairingCode.addEventListener("click", () => copyText(state.pairingCode, "验证码已复制"));
 els.draftTable.addEventListener("click", event => { const button = event.target.closest(".delete-draft"); if (button) { const draft = state.drafts.find(item => item.id === Number(button.dataset.id)); if (draft) deleteDraftRecord(draft); } });
 
 els.dropZone.addEventListener("click", () => els.input.click());
@@ -815,5 +811,5 @@ els.assetTable.addEventListener("click", event => {
 });
 
 els.assetTable.addEventListener("error", event => { if (event.target.tagName === "IMG") event.target.closest(".asset-thumb")?.classList.add("broken"); }, true);
-renderSkillConfig();
+renderPairingCode();
 bootstrapAuth();

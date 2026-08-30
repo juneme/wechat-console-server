@@ -4,15 +4,15 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>微信公众号控制台</title>
+    <title>云浪控制台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v=8">
+    <link rel="stylesheet" href="/static/app.css?v=10">
   </head>
   <body>
     <section id="authView" class="auth-view" aria-labelledby="loginTitle">
       <div class="auth-visual" aria-hidden="true">
         <div class="auth-brand-wrap">
-          <div class="auth-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <div class="auth-brand"><span class="brand-mark">云</span><span>云浪控制台</span></div>
           <p class="auth-slogan">创意予你无限，codex重塑未来</p>
         </div>
         <div class="contact-sheet">
@@ -23,11 +23,11 @@
           <span class="visual-tile tile-five"></span>
           <span class="visual-tile tile-six"></span>
         </div>
-        <p class="visual-caption">WECHAT OPERATIONS CONSOLE <span>2026</span></p>
+        <p class="visual-caption">CLOUDWAVE CONSOLE <span>2026</span></p>
       </div>
       <div class="auth-panel">
         <form id="loginForm" class="login-form" hidden>
-          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <div class="mobile-brand"><span class="brand-mark">云</span><span>云浪控制台</span></div>
           <p class="kicker">ACCOUNT ACCESS</p>
           <h1 id="loginTitle">登录控制台</h1>
           <label class="field-label" for="loginUsername">用户名</label>
@@ -39,7 +39,7 @@
           <button id="showRegister" class="auth-switch" type="button">没有账号？立即注册</button>
         </form>
         <form id="registerForm" class="register-form" hidden>
-          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <div class="mobile-brand"><span class="brand-mark">云</span><span>云浪控制台</span></div>
           <p class="kicker">CREATE ACCOUNT</p>
           <h1 id="registerTitle">注册账号</h1>
           <label class="field-label" for="registerUsername">用户名</label>
@@ -53,7 +53,7 @@
           <button id="showLogin" class="auth-switch" type="button">已有账号？返回登录</button>
         </form>
         <form id="setupForm" class="setup-form" hidden>
-          <div class="mobile-brand"><span class="brand-mark">微</span><span>公众号控制台</span></div>
+          <div class="mobile-brand"><span class="brand-mark">云</span><span>云浪控制台</span></div>
           <p class="kicker">FIRST RUN</p>
           <h1 id="setupTitle">初始化控制台</h1>
           <label class="field-label" for="setupToken">一次性初始化码</label>
@@ -72,7 +72,7 @@
 
     <div id="appShell" class="app-shell" hidden>
       <aside class="sidebar">
-        <div class="sidebar-brand"><span class="brand-mark">微</span><div><strong>公众号控制台</strong><small>WECHAT OPS</small></div></div>
+        <div class="sidebar-brand"><span class="brand-mark">云</span><div><strong>云浪控制台</strong><small>CLOUDWAVE</small></div></div>
         <div class="account-chip"><span id="sidebarAccountMark" class="account-mark">未</span><div><strong id="sidebarAccountName">未配置公众号</strong><small id="sidebarAccountId">等待配置</small></div></div>
         <nav class="sidebar-nav" aria-label="控制台导航">
           <button class="nav-item active" type="button" data-view="overview"><span>总览</span><small>01</small></button>
@@ -155,18 +155,19 @@
           </section>
 
           <section class="view" data-view-panel="api">
-            <section id="adminSkillSection" class="content-section">
+            <section id="adminPairingSection" class="content-section">
               <div class="section-heading stack-mobile">
-                <div><p class="section-index">SKILL CONFIG</p><h2>Skill 客户端配置</h2></div>
-                <div class="header-actions"><button id="toggleSkillConfig" class="button primary" type="button">显示配置</button><button id="copySkillConfig" class="button secondary" type="button" disabled>复制全部</button></div>
+                <div><p class="section-index">ONE-TIME PAIRING</p><h2>AI 配对验证码</h2></div>
+                <button id="generatePairingCode" class="button primary" type="button">生成 1 分钟验证码</button>
               </div>
-              <div id="skillConfigPanel" class="skill-config-panel" aria-live="polite">
-                <p id="skillConfigHint" class="skill-config-hint">登录管理员账号后可直接读取，无需进入服务器 .env。密钥默认隐藏且不会被浏览器缓存。</p>
-                <div class="skill-config-list">
-                  <div class="skill-config-row"><label for="skillConsoleUrl">WECHAT_CONSOLE_URL</label><input id="skillConsoleUrl" class="skill-config-value" type="text" readonly value="点击“显示配置”读取"><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_CONSOLE_URL" disabled>复制</button></div>
-                  <div class="skill-config-row"><label for="skillImageKey">WECHAT_IMAGE_API_KEY</label><input id="skillImageKey" class="skill-config-value" type="password" readonly value=""><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_IMAGE_API_KEY" disabled>复制</button></div>
-                  <div class="skill-config-row"><label for="skillPublishKey">WECHAT_PUBLISH_API_KEY</label><input id="skillPublishKey" class="skill-config-value" type="password" readonly value=""><button class="button secondary copy-skill-value" type="button" data-config-key="WECHAT_PUBLISH_API_KEY" disabled>复制</button></div>
+              <div class="pairing-panel">
+                <div class="pairing-code-wrap">
+                  <code id="pairingCode" class="pairing-code">---- ----</code>
+                  <span id="pairingCountdown" class="pairing-countdown">尚未生成</span>
+                  <button id="copyPairingCode" class="button secondary" type="button" disabled>复制</button>
                 </div>
+                <p id="pairingHint" class="pairing-hint">生成后手动交给 AI，验证码仅可兑换一次。HTTP 可以使用，但建议配置 HTTPS。</p>
+                <code id="pairingExchangeUrl" class="pairing-endpoint">POST /api/v1/pairing/exchange</code>
               </div>
             </section>
             <section class="content-section">
@@ -179,7 +180,7 @@
             </section>
             <section class="content-section">
               <div class="section-heading"><div><p class="section-index">SECURITY</p><h2>服务端边界</h2></div></div>
-              <div class="security-grid"><div><strong>AppSecret</strong><span>仅服务端加密保存</span></div><div><strong>Access Token</strong><span>自动缓存与刷新</span></div><div><strong>API Key</strong><span>图片与发布权限隔离</span></div></div>
+              <div class="security-grid"><div><strong>AppSecret</strong><span>仅服务端加密保存</span></div><div><strong>Access Token</strong><span>自动缓存与刷新</span></div><div><strong>客户端令牌</strong><span>仅由一次性验证码签发</span></div></div>
             </section>
           </section>
 
@@ -202,6 +203,6 @@
       <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><h3 id="confirmTitle">确认操作</h3><p id="confirmMessage"></p><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button id="confirmAction" class="button danger" value="confirm">确认</button></div></form></dialog>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=10" defer></script>
+    <script src="/static/app.js?v=12" defer></script>
   </body>
 </html>

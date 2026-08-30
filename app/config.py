@@ -28,8 +28,6 @@ class Settings:
     permanent_max_bytes: int
     article_max_dimension: int
     public_base_url: str
-    ai_api_key: str
-    temp_api_key: str
     temp_storage_path: Path
     temp_max_bytes: int
     temp_storage_max_bytes: int
@@ -39,41 +37,16 @@ class Settings:
     max_users: int
     max_accounts_per_user: int
     credentials_encryption_key: str
-    publish_api_key: str
 
     @property
     def wechat_configured(self) -> bool:
         return bool(self.wechat_app_id and self.wechat_app_secret)
-
-    @property
-    def temp_api_configured(self) -> bool:
-        return bool(self.temp_api_key)
-
-    @property
-    def ai_api_configured(self) -> bool:
-        return bool(self.ai_api_key)
-
-    @property
-    def publish_api_configured(self) -> bool:
-        return bool(self.publish_api_key)
 
     def validate_runtime(self) -> None:
         if self.admin_password and len(self.admin_password) < 12:
             raise RuntimeError("ADMIN_PASSWORD must contain at least 12 characters")
         if self.admin_password.startswith("replace-with-"):
             raise RuntimeError("ADMIN_PASSWORD must not use the example placeholder")
-        if self.temp_api_key and len(self.temp_api_key) < 24:
-            raise RuntimeError("TEMP_API_KEY must contain at least 24 characters")
-        if self.temp_api_key.startswith("replace-with-"):
-            raise RuntimeError("TEMP_API_KEY must not use the example placeholder")
-        if self.ai_api_key and len(self.ai_api_key) < 24:
-            raise RuntimeError("AI_API_KEY must contain at least 24 characters")
-        if self.ai_api_key.startswith("replace-with-"):
-            raise RuntimeError("AI_API_KEY must not use the example placeholder")
-        if self.publish_api_key and len(self.publish_api_key) < 24:
-            raise RuntimeError("PUBLISH_API_KEY must contain at least 24 characters")
-        if self.publish_api_key.startswith("replace-with-"):
-            raise RuntimeError("PUBLISH_API_KEY must not use the example placeholder")
         if self.credentials_encryption_key and len(self.credentials_encryption_key) < 24:
             raise RuntimeError(
                 "CREDENTIALS_ENCRYPTION_KEY must contain at least 24 characters"
@@ -119,8 +92,6 @@ def get_settings() -> Settings:
         permanent_max_bytes=_int_env("PERMANENT_MAX_BYTES", 10_000_000),
         article_max_dimension=_int_env("ARTICLE_MAX_DIMENSION", 2000),
         public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
-        ai_api_key=os.getenv("AI_API_KEY", "").strip(),
-        temp_api_key=os.getenv("TEMP_API_KEY", "").strip(),
         temp_storage_path=Path(os.getenv("TEMP_STORAGE_PATH", "/data/temp-images")),
         temp_max_bytes=_int_env("TEMP_MAX_BYTES", 1_000_000),
         temp_storage_max_bytes=_int_env("TEMP_STORAGE_MAX_BYTES", 5_000_000_000),
@@ -134,5 +105,4 @@ def get_settings() -> Settings:
         credentials_encryption_key=os.getenv(
             "CREDENTIALS_ENCRYPTION_KEY", ""
         ).strip(),
-        publish_api_key=os.getenv("PUBLISH_API_KEY", "").strip(),
     )

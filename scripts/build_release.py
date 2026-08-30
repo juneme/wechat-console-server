@@ -47,9 +47,7 @@ SERVER_MANIFEST = (
     "pyproject.toml",
     "requirements-dev.txt",
     "requirements.txt",
-    "rotate-api-keys.sh",
     "scripts/build_release.py",
-    "show-client-config.sh",
 )
 REQUIRED_FILES = {
     "LICENSE",
@@ -59,8 +57,6 @@ REQUIRED_FILES = {
     "app/passwords.py",
     "docker-compose.yml",
     "install.sh",
-    "rotate-api-keys.sh",
-    "show-client-config.sh",
 }
 EXCLUDED_PARTS = {
     ".git",

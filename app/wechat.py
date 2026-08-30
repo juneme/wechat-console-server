@@ -175,6 +175,32 @@ class WechatClient:
             raise WechatAPIError(None, "微信未返回草稿 media_id")
         return str(media_id)
 
+    async def get_draft(self, media_id: str) -> dict[str, Any]:
+        return await self._post_json(
+            "https://api.weixin.qq.com/cgi-bin/draft/get",
+            payload={"media_id": media_id},
+        )
+
+    async def list_drafts(
+        self, *, offset: int = 0, count: int = 20, no_content: bool = False
+    ) -> dict[str, Any]:
+        return await self._post_json(
+            "https://api.weixin.qq.com/cgi-bin/draft/batchget",
+            payload={
+                "offset": offset,
+                "count": count,
+                "no_content": 1 if no_content else 0,
+            },
+        )
+
+    async def update_draft(
+        self, media_id: str, article: dict[str, Any], *, index: int = 0
+    ) -> None:
+        await self._post_json(
+            "https://api.weixin.qq.com/cgi-bin/draft/update",
+            payload={"media_id": media_id, "index": index, "articles": article},
+        )
+
     async def delete_draft(self, media_id: str) -> None:
         await self._post_json(
             "https://api.weixin.qq.com/cgi-bin/draft/delete",

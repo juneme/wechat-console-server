@@ -2,18 +2,29 @@
 
 ## Unreleased
 
+## 4.0.0 - 2026-08-30
+
+- Replace all static client API keys with a unified token issued from a 60-second, single-use pairing code.
+- Store only token hashes, revoke the previous token on re-pairing, and revoke client tokens on password changes.
+- Remove legacy key display, environment configuration, rotation scripts, and the legacy service-credentials table.
+- Use the unified token for image upload, temporary images, and local or remote WeChat draft CRUD.
+- Add AI endpoints to list, inspect, update, and delete WeChat drafts through the official draft APIs.
+- Add direct WeChat draft-box listing and media-id CRUD for drafts without local task records, while merging partial updates against the latest remote article.
+- Hard-delete local draft jobs after remote deletion so deleted records no longer accumulate in the console.
+- Treat already-missing permanent materials as remotely absent and clean their local records; WeChat article-image URLs still have no deletion API.
+
 ## 3.2.2 - 2026-08-20
 
 - Add a product-focused console visual and a creator-value visual to the GitHub homepage.
 - Move the real overview screenshot into the console gallery alongside the API screenshot.
 - Include the new README visuals in verified server release archives.
-- Change the localhost listener and reverse-proxy target from `127.0.0.1:8787` to `127.0.0.1:8791` while keeping the container port at `8000`.
+- Change the localhost listener and reverse-proxy target to `127.0.0.1:8791` while keeping the container port at `8000`.
 
 ## 3.2.1 - 2026-08-20
 
 - Add real console screenshots and a shared end-to-end project workflow to the GitHub homepage.
-- Present `wechat-console-server` and `wechat-article-designer` as the two parts of one WeChat article workflow with bidirectional documentation links.
-- Include all README images in verified server release archives for offline documentation.
+- Present the console server and article-design skill as one workflow with bidirectional documentation links.
+- Include README visuals in verified server release archives.
 
 ## 3.2.0 - 2026-08-18
 

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def _now() -> str:
@@ -131,18 +131,6 @@ class AssetStore:
             )
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS service_credentials (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    ai_api_key_ciphertext TEXT NOT NULL,
-                    publish_api_key_ciphertext TEXT NOT NULL,
-                    temp_api_key_ciphertext TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -244,6 +232,14 @@ class AssetStore:
                     (_now(),),
                 )
                 connection.execute("PRAGMA user_version = 3")
+            if current_version < 4:
+                self._migrate_to_v4(connection)
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
+                    "VALUES (4, ?)",
+                    (_now(),),
+                )
+                connection.execute("PRAGMA user_version = 4")
 
     def _migrate_to_v3(self, connection: sqlite3.Connection) -> None:
         now = _now()
@@ -434,6 +430,23 @@ class AssetStore:
             "ON draft_jobs(user_id, account_id, updated_at DESC)"
         )
 
+    def _migrate_to_v4(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE client_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX idx_client_tokens_user ON client_tokens(user_id)"
+        )
+        connection.execute("DROP TABLE IF EXISTS service_credentials")
+
     def schema_version(self) -> int:
         with self._connect() as connection:
             return int(connection.execute("PRAGMA user_version").fetchone()[0])
@@ -616,53 +629,42 @@ class AssetStore:
             return False
         return True
 
-    def initialize_console_credentials(
-        self,
-        *,
-        username: str,
-        password_hash: str,
-        ai_api_key_ciphertext: str,
-        publish_api_key_ciphertext: str,
-        temp_api_key_ciphertext: str,
-    ) -> bool:
+    def replace_client_token(self, *, token_hash: str, user_id: int) -> None:
         now = _now()
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO users (
-                    username, password_hash, role, created_at, updated_at
-                ) VALUES (?, ?, 'admin', ?, ?)
-                """,
-                (username, password_hash, now, now),
-            )
-            if cursor.rowcount != 1:
-                return False
+            connection.execute("DELETE FROM client_tokens WHERE user_id = ?", (user_id,))
             connection.execute(
                 """
-                INSERT INTO service_credentials (
-                    id, ai_api_key_ciphertext, publish_api_key_ciphertext,
-                    temp_api_key_ciphertext, created_at, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?)
+                INSERT INTO client_tokens (token_hash, user_id, created_at)
+                VALUES (?, ?, ?)
                 """,
-                (
-                    ai_api_key_ciphertext,
-                    publish_api_key_ciphertext,
-                    temp_api_key_ciphertext,
-                    now,
-                    now,
-                ),
+                (token_hash, user_id, now),
             )
-            self._claim_unassigned_legacy_data(
-                connection, int(cursor.lastrowid)
-            )
-        return True
 
-    def get_service_credentials(self) -> dict[str, Any] | None:
+    def get_client_token(self, token_hash: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM service_credentials WHERE id = 1"
+                """
+                SELECT client_tokens.*, users.username, users.role
+                FROM client_tokens
+                JOIN users ON users.id = client_tokens.user_id
+                WHERE client_tokens.token_hash = ?
+                """,
+                (token_hash,),
             ).fetchone()
+            if row:
+                connection.execute(
+                    "UPDATE client_tokens SET last_used_at = ? WHERE id = ?",
+                    (_now(), row["id"]),
+                )
         return dict(row) if row else None
+
+    def revoke_client_tokens(self, user_id: int) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM client_tokens WHERE user_id = ?", (user_id,)
+            )
+        return cursor.rowcount
 
     def change_admin_password_hash(self, password_hash: str) -> int:
         admin = self.get_admin_user()
@@ -681,6 +683,7 @@ class AssetStore:
             revoked = connection.execute(
                 "DELETE FROM admin_sessions WHERE user_id = ?", (user_id,)
             ).rowcount
+            connection.execute("DELETE FROM client_tokens WHERE user_id = ?", (user_id,))
         return revoked
 
     def get_admin_session(
@@ -1231,6 +1234,28 @@ class AssetStore:
             row = connection.execute(query, values).fetchone()
         return dict(row) if row else None
 
+    def get_draft_job_by_media_id(
+        self,
+        media_id: str,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        filters = ["media_id = ?"]
+        values: list[Any] = [media_id]
+        if user_id is not None:
+            filters.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("account_id = ?")
+            values.append(account_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT * FROM draft_jobs WHERE {' AND '.join(filters)}",
+                values,
+            ).fetchone()
+        return dict(row) if row else None
+
     def create_draft_job(
         self,
         *,
@@ -1298,6 +1323,74 @@ class AssetStore:
                 f"UPDATE draft_jobs SET {', '.join(updates)} WHERE id = ?", values
             )
         return self.get_draft_job(draft_id) or {}
+
+    def update_draft_content(
+        self,
+        draft_id: int,
+        *,
+        content_hash: str,
+        title: str,
+        author: str,
+        digest: str,
+        content: str,
+        content_source_url: str,
+        thumb_media_id: str,
+        need_open_comment: int,
+        only_fans_can_comment: int,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE draft_jobs
+                SET content_hash = ?, title = ?, author = ?, digest = ?, content = ?,
+                    content_source_url = ?, thumb_media_id = ?, need_open_comment = ?,
+                    only_fans_can_comment = ?, status = 'created', last_error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    content_hash,
+                    title,
+                    author,
+                    digest,
+                    content,
+                    content_source_url,
+                    thumb_media_id,
+                    need_open_comment,
+                    only_fans_can_comment,
+                    _now(),
+                    draft_id,
+                ),
+            )
+        return self.get_draft_job(draft_id) or {}
+
+    def delete_draft_job(
+        self,
+        draft_id: int,
+        *,
+        user_id: int | None = None,
+        account_id: int | None = None,
+    ) -> bool:
+        filters = ["id = ?"]
+        values: list[Any] = [draft_id]
+        if user_id is not None:
+            filters.append("user_id = ?")
+            values.append(user_id)
+        if account_id is not None:
+            filters.append("account_id = ?")
+            values.append(account_id)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM draft_jobs WHERE {' AND '.join(filters)}", values
+            )
+        return cursor.rowcount == 1
+
+    def purge_deleted_draft_jobs(self) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM draft_jobs WHERE status = 'deleted'"
+            )
+        return cursor.rowcount
 
     def list_draft_jobs(
         self,

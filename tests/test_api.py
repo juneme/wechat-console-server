@@ -33,22 +33,66 @@ class FakeWechatClient:
         self.deleted: list[str] = []
         self.deleted_drafts: list[str] = []
         self.created_drafts: list[dict] = []
+        self.updated_drafts: list[tuple[str, int, dict]] = []
+        self.remote_drafts: dict[str, dict] = {}
+        self.missing_materials: set[str] = set()
 
     async def upload_permanent_image(self, **_: object) -> dict[str, str]:
         return {"media_id": "media-1", "url": "https://example.test/material/1"}
+
+    async def upload_article_image(self, **_: object) -> str:
+        return "https://mmbiz.qpic.cn/test/article-image"
 
     async def get_token(self, **_: object) -> str:
         return "test-access-token"
 
     async def delete_permanent_material(self, media_id: str) -> None:
+        if media_id in self.missing_materials:
+            raise WechatAPIError(40007, "invalid media_id")
         self.deleted.append(media_id)
 
     async def create_draft(self, article: dict) -> str:
         self.created_drafts.append(article)
+        self.remote_drafts["draft-media-1"] = dict(article)
         return "draft-media-1"
+
+    async def get_draft(self, media_id: str) -> dict:
+        article = self.remote_drafts.get(media_id)
+        if article is None:
+            raise WechatAPIError(40007, "invalid media_id")
+        return {
+            "media_id": media_id,
+            "news_item": [dict(article)],
+        }
+
+    async def list_drafts(
+        self, *, offset: int = 0, count: int = 20, no_content: bool = False
+    ) -> dict:
+        items = [
+            {
+                "media_id": media_id,
+                "content": {} if no_content else {"news_item": [dict(article)]},
+            }
+            for media_id, article in self.remote_drafts.items()
+        ]
+        page = items[offset : offset + count]
+        return {
+            "item": page,
+            "item_count": len(page),
+            "total_count": len(items),
+        }
+
+    async def update_draft(
+        self, media_id: str, article: dict, *, index: int = 0
+    ) -> None:
+        self.updated_drafts.append((media_id, index, article))
+        if media_id not in self.remote_drafts:
+            raise WechatAPIError(40007, "invalid media_id")
+        self.remote_drafts[media_id] = dict(article)
 
     async def delete_draft(self, media_id: str) -> None:
         self.deleted_drafts.append(media_id)
+        self.remote_drafts.pop(media_id, None)
 
 
 class AmbiguousDraftWechatClient(FakeWechatClient):
@@ -65,6 +109,28 @@ def _png_bytes() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (32, 24), "green").save(output, "PNG")
     return output.getvalue()
+
+
+def _pair_client(
+    client: TestClient,
+    *,
+    username: str = "admin",
+    password: str = "strong-password",
+) -> dict[str, str]:
+    web_headers = {"X-Requested-With": "WechatUploader"}
+    login = client.post(
+        "/api/auth/login",
+        headers=web_headers,
+        json={"username": username, "password": password},
+    )
+    assert login.status_code == 200
+    generated = client.post("/api/pairing-code", headers=web_headers)
+    assert generated.status_code == 200
+    exchanged = client.post(
+        "/api/v1/pairing/exchange", json={"code": generated.json()["code"]}
+    )
+    assert exchanged.status_code == 200
+    return {"Authorization": f"Bearer {exchanged.json()['client_token']}"}
 
 
 def test_records_survive_reload_and_delete_remote_material(
@@ -107,7 +173,26 @@ def test_records_survive_reload_and_delete_remote_material(
         )
         assert deleted.status_code == 200
         assert deleted.json()["deleted_count"] == 1
+        assert deleted.json()["deleted"][0]["local_deleted"] is True
+        assert deleted.json()["deleted"][0]["remote_deleted"] is True
         assert fake_wechat.deleted == ["media-1"]
+        assert client.get("/api/assets").json()["items"] == []
+
+        uploaded_again = client.post(
+            "/api/upload",
+            headers=headers,
+            data={"mode": "material"},
+            files={"image": ("photo.png", _png_bytes(), "image/png")},
+        ).json()["asset"]
+        fake_wechat.missing_materials.add("media-1")
+        missing_remote = client.post(
+            "/api/assets/delete",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"items": [{"kind": "wechat", "id": uploaded_again["id"]}]},
+        )
+        assert missing_remote.status_code == 200
+        assert missing_remote.json()["deleted"][0]["remote_missing"] is True
+        assert missing_remote.json()["deleted"][0]["local_deleted"] is True
         assert client.get("/api/assets").json()["items"] == []
 
     get_settings.cache_clear()
@@ -152,7 +237,7 @@ def test_admin_login_session_and_logout(tmp_path: Path, monkeypatch) -> None:
     get_settings.cache_clear()
 
 
-def test_first_run_setup_creates_admin_and_service_keys(
+def test_first_run_setup_creates_admin_without_legacy_service_keys(
     tmp_path: Path, monkeypatch
 ) -> None:
     for name in (
@@ -227,25 +312,20 @@ def test_first_run_setup_creates_admin_and_service_keys(
         assert credentials["username"] == "owner"
         assert credentials["password_hash"].startswith("$argon2id$")
         assert "first-run-password" not in credentials["password_hash"]
-        assert app.state.settings.ai_api_configured
-        assert app.state.settings.publish_api_configured
-        assert app.state.settings.temp_api_configured
-        service_credentials = app.state.store.get_service_credentials()
-        assert service_credentials is not None
-        assert service_credentials["ai_api_key_ciphertext"] != (
-            app.state.settings.ai_api_key
-        )
-        assert service_credentials["publish_api_key_ciphertext"] != (
-            app.state.settings.publish_api_key
-        )
+        with app.state.store._connect() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        assert "service_credentials" not in tables
 
     with TestClient(app) as restarted_client:
         assert restarted_client.get("/api/setup/status").json() == {
             "configured": True,
             "requires_token": False,
         }
-        assert app.state.settings.ai_api_configured
-        assert app.state.settings.publish_api_configured
         assert restarted_client.post(
             "/api/auth/login",
             headers=headers,
@@ -279,6 +359,10 @@ def test_password_change_is_immediate_and_revokes_all_sessions(
         )
         second_token = second_login.cookies.get("wechat_uploader_session")
         assert first_token and second_token and first_token != second_token
+        code = client.post("/api/pairing-code", headers=headers).json()["code"]
+        paired_token = client.post(
+            "/api/v1/pairing/exchange", json={"code": code}
+        ).json()["client_token"]
 
         rejected = client.post(
             "/api/auth/password",
@@ -305,6 +389,10 @@ def test_password_change_is_immediate_and_revokes_all_sessions(
         for token in (first_token, second_token):
             token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
             assert app.state.store.get_admin_session(token_hash) is None
+        assert client.get(
+            "/api/v1/temp-images",
+            headers={"Authorization": f"Bearer {paired_token}"},
+        ).status_code == 401
 
         assert client.post(
             "/api/auth/login",
@@ -347,7 +435,7 @@ def test_registration_role_and_password_change_are_user_scoped(
         assert registered.status_code == 200
         assert registered.json()["user"] == {"username": "alice", "role": "user"}
         assert client.get("/api/auth/me").json()["user"]["role"] == "user"
-        assert client.post("/api/skill-client-config", headers=headers).status_code == 403
+        assert client.post("/api/pairing-code", headers=headers).status_code == 403
         assert client.post(
             "/api/auth/register",
             headers=headers,
@@ -874,7 +962,6 @@ def test_ai_wechat_api_returns_required_json_fields(
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
     monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
     monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
-    monkeypatch.setenv("AI_API_KEY", "test-ai-key-at-least-24-characters")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
     monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
     get_settings.cache_clear()
@@ -887,10 +974,11 @@ def test_ai_wechat_api_returns_required_json_fields(
             files={"images": ("photo.png", _png_bytes(), "image/png")},
         )
         assert unauthorized.status_code == 401
+        api_headers = _pair_client(client)
 
         uploaded = client.post(
             "/api/v1/wechat-images",
-            headers={"Authorization": "Bearer test-ai-key-at-least-24-characters"},
+            headers=api_headers,
             data={"mode": "material"},
             files={"images": ("photo.png", _png_bytes(), "image/png")},
         )
@@ -902,6 +990,17 @@ def test_ai_wechat_api_returns_required_json_fields(
         assert item["size"] == len(_png_bytes())
         assert item["uploaded_at"]
         assert item["media_id"] == "media-1"
+
+        paired_upload = client.post(
+            "/api/v1/wechat-images",
+            headers=api_headers,
+            data={"mode": "article"},
+            files={"images": ("body.png", _png_bytes(), "image/png")},
+        )
+        assert paired_upload.status_code == 201
+        assert paired_upload.json()["items"][0]["article_url"].startswith(
+            "https://"
+        )
         assert list((tmp_path / "temp-images").iterdir()) == []
 
     get_settings.cache_clear()
@@ -911,14 +1010,12 @@ def test_ai_api_can_target_a_selected_admin_account(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
-    monkeypatch.setenv("AI_API_KEY", "test-ai-key-at-least-24-characters")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
     monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
     monkeypatch.delenv("WECHAT_APP_ID", raising=False)
     monkeypatch.delenv("WECHAT_APP_SECRET", raising=False)
     get_settings.cache_clear()
     web_headers = {"X-Requested-With": "WechatUploader"}
-    api_headers = {"Authorization": "Bearer test-ai-key-at-least-24-characters"}
 
     with TestClient(app) as client:
         app.state.wechat = FakeWechatClient()
@@ -940,6 +1037,7 @@ def test_ai_api_can_target_a_selected_admin_account(
                 },
             )
             account_ids.append(created.json()["account"]["id"])
+        api_headers = _pair_client(client)
 
         selected_headers = {
             **api_headers,
@@ -1016,7 +1114,6 @@ def test_publish_api_creates_idempotent_draft(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
     monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
     monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
-    monkeypatch.setenv("PUBLISH_API_KEY", "publish-api-key-at-least-24-characters")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
     monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
     get_settings.cache_clear()
@@ -1033,12 +1130,10 @@ def test_publish_api_creates_idempotent_draft(tmp_path: Path, monkeypatch) -> No
         "need_open_comment": 0,
         "only_fans_can_comment": 0,
     }
-    api_headers = {
-        "Authorization": "Bearer publish-api-key-at-least-24-characters"
-    }
     fake_wechat = FakeWechatClient()
     with TestClient(app) as client:
         app.state.wechat = fake_wechat
+        api_headers = _pair_client(client)
         created = client.post(
             "/api/v1/wechat-drafts", headers=api_headers, json=payload
         )
@@ -1073,6 +1168,135 @@ def test_publish_api_creates_idempotent_draft(tmp_path: Path, monkeypatch) -> No
         )
         assert deleted.status_code == 200
         assert fake_wechat.deleted_drafts == ["draft-media-1"]
+        assert client.get("/api/drafts").json()["count"] == 0
+        assert app.state.store.get_draft_job(draft_id) is None
+
+    get_settings.cache_clear()
+
+
+def test_publish_api_can_list_get_update_and_delete_draft(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
+    monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
+    monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
+    monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
+    get_settings.cache_clear()
+
+    payload = {
+        "request_id": "article-crud-20260830-001",
+        "title": "修改前标题",
+        "author": "作者",
+        "digest": "修改前摘要",
+        "content": '<section><img src="https://mmbiz.qpic.cn/test/a.jpg"></section>',
+        "content_source_url": "https://example.test/source",
+        "thumb_media_id": "cover-media-id",
+        "need_open_comment": 0,
+        "only_fans_can_comment": 0,
+    }
+    fake_wechat = FakeWechatClient()
+
+    with TestClient(app) as client:
+        app.state.wechat = fake_wechat
+        headers = _pair_client(client)
+        created = client.post(
+            "/api/v1/wechat-drafts", headers=headers, json=payload
+        )
+        assert created.status_code == 201
+
+        listing = client.get("/api/v1/wechat-drafts", headers=headers)
+        assert listing.status_code == 200
+        assert listing.json()["count"] == 1
+        draft_id = listing.json()["items"][0]["id"]
+
+        detail = client.get(
+            f"/api/v1/wechat-drafts/{draft_id}", headers=headers
+        )
+        assert detail.status_code == 200
+        assert detail.json()["remote_checked"] is True
+        assert detail.json()["remote_exists"] is True
+        assert detail.json()["draft"]["content"] == payload["content"]
+
+        fake_wechat.remote_drafts["draft-media-1"]["title"] = "微信后台新标题"
+        updated = client.put(
+            f"/api/v1/wechat-drafts/{draft_id}",
+            headers=headers,
+            json={"digest": "修改后摘要"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["draft"]["title"] == "微信后台新标题"
+        assert updated.json()["remote_updated"] is True
+        assert fake_wechat.updated_drafts[0][0:2] == ("draft-media-1", 0)
+        assert fake_wechat.updated_drafts[0][2]["title"] == "微信后台新标题"
+        saved = app.state.store.get_draft_job(draft_id)
+        assert saved is not None
+        assert saved["title"] == "微信后台新标题"
+
+        fake_wechat.remote_drafts["manual-media-1"] = {
+            "article_type": "news",
+            "title": "微信后台原有草稿",
+            "author": "",
+            "digest": "原摘要",
+            "content": '<section><img src="https://mmbiz.qpic.cn/test/b.jpg"></section>',
+            "content_source_url": "",
+            "thumb_media_id": "manual-cover-id",
+            "show_cover_pic": 1,
+            "need_open_comment": 0,
+            "only_fans_can_comment": 0,
+        }
+        remote_listing = client.get(
+            "/api/v1/wechat-drafts/wechat-box", headers=headers
+        )
+        assert remote_listing.status_code == 200
+        assert remote_listing.json()["total_count"] == 2
+        assert {item["media_id"] for item in remote_listing.json()["items"]} == {
+            "draft-media-1",
+            "manual-media-1",
+        }
+
+        remote_detail = client.get(
+            "/api/v1/wechat-drafts/wechat-box/manual-media-1", headers=headers
+        )
+        assert remote_detail.status_code == 200
+        assert remote_detail.json()["article"]["title"] == "微信后台原有草稿"
+
+        remote_updated = client.put(
+            "/api/v1/wechat-drafts/wechat-box/manual-media-1",
+            headers=headers,
+            json={"digest": "AI 修改后的摘要"},
+        )
+        assert remote_updated.status_code == 200
+        assert remote_updated.json()["article"]["title"] == "微信后台原有草稿"
+        assert remote_updated.json()["draft"] is None
+        assert fake_wechat.remote_drafts["manual-media-1"]["show_cover_pic"] == 1
+
+        cleared_author = client.put(
+            "/api/v1/wechat-drafts/wechat-box/manual-media-1",
+            headers=headers,
+            json={"author": ""},
+        )
+        assert cleared_author.status_code == 200
+        assert fake_wechat.remote_drafts["manual-media-1"]["author"] == ""
+
+        remote_deleted = client.delete(
+            "/api/v1/wechat-drafts/wechat-box/manual-media-1", headers=headers
+        )
+        assert remote_deleted.status_code == 200
+        assert remote_deleted.json()["remote_deleted"] is True
+        assert "manual-media-1" not in fake_wechat.remote_drafts
+
+        deleted = client.delete(
+            f"/api/v1/wechat-drafts/{draft_id}", headers=headers
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["remote_deleted"] is True
+        assert deleted.json()["local_deleted"] is True
+        assert fake_wechat.deleted_drafts == ["manual-media-1", "draft-media-1"]
+        assert app.state.store.get_draft_job(draft_id) is None
+        assert client.get("/api/v1/wechat-drafts", headers=headers).json()[
+            "count"
+        ] == 0
 
     get_settings.cache_clear()
 
@@ -1081,7 +1305,6 @@ def test_ambiguous_draft_result_is_not_retried(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
     monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
     monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
-    monkeypatch.setenv("PUBLISH_API_KEY", "publish-api-key-at-least-24-characters")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
     monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
     get_settings.cache_clear()
@@ -1091,13 +1314,11 @@ def test_ambiguous_draft_result_is_not_retried(tmp_path: Path, monkeypatch) -> N
         "content": '<img src="https://mmbiz.qpic.cn/test/image.jpg">',
         "thumb_media_id": "cover-media-id",
     }
-    headers = {
-        "Authorization": "Bearer publish-api-key-at-least-24-characters"
-    }
     fake_wechat = AmbiguousDraftWechatClient()
 
     with TestClient(app) as client:
         app.state.wechat = fake_wechat
+        headers = _pair_client(client)
         first = client.post("/api/v1/wechat-drafts", headers=headers, json=payload)
         assert first.status_code == 502
         assert app.state.store.get_draft_job_by_request_id(payload["request_id"])[
@@ -1147,9 +1368,6 @@ def test_diagnostics_reports_readiness_without_secrets(
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
     monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
     monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
-    monkeypatch.setenv("AI_API_KEY", "image-api-key-at-least-24-characters")
-    monkeypatch.setenv("PUBLISH_API_KEY", "publish-api-key-at-least-24-characters")
-    monkeypatch.setenv("TEMP_API_KEY", "temp-api-key-at-least-24-characters")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
     monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
     get_settings.cache_clear()
@@ -1170,20 +1388,16 @@ def test_diagnostics_reports_readiness_without_secrets(
         assert {check["id"] for check in payload["checks"]} == {
             "database",
             "wechat",
-            "image_api",
-            "publish_api",
-            "temporary_api",
+            "client_api",
             "public_url",
         }
         serialized = response.text
-        assert "image-api-key-at-least-24-characters" not in serialized
-        assert "publish-api-key-at-least-24-characters" not in serialized
         assert "secret-test" not in serialized
 
     get_settings.cache_clear()
 
 
-def test_skill_client_config_requires_admin_and_disables_caching(
+def test_legacy_keys_and_config_endpoint_are_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
     image_key = "image-api-key-at-least-24-characters"
@@ -1199,31 +1413,94 @@ def test_skill_client_config_requires_admin_and_disables_caching(
     headers = {"X-Requested-With": "WechatUploader"}
 
     with TestClient(app) as client:
-        unauthorized = client.post("/api/skill-client-config", headers=headers)
-        assert unauthorized.status_code == 401
+        assert client.post("/api/skill-client-config", headers=headers).status_code == 404
+        for legacy_key in (image_key, publish_key):
+            rejected = client.get(
+                "/api/v1/temp-images",
+                headers={"Authorization": f"Bearer {legacy_key}"},
+            )
+            assert rejected.status_code == 401
 
+    get_settings.cache_clear()
+
+
+def test_pairing_code_is_admin_only_single_use_and_allows_http(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://console.example.test")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
+    monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
+    get_settings.cache_clear()
+    headers = {"X-Requested-With": "WechatUploader"}
+
+    with TestClient(app) as client:
+        assert client.post("/api/pairing-code", headers=headers).status_code == 401
         login = client.post(
             "/api/auth/login",
             headers=headers,
             json={"username": "admin", "password": "strong-password"},
         )
         assert login.status_code == 200
-        assert client.post("/api/skill-client-config").status_code == 403
+        assert client.post("/api/pairing-code").status_code == 403
 
-        response = client.post("/api/skill-client-config", headers=headers)
-        assert response.status_code == 200
-        assert response.headers["cache-control"] == "no-store, private"
-        assert response.headers["pragma"] == "no-cache"
-        assert response.json() == {
-            "configured": True,
-            "values": {
-                "WECHAT_CONSOLE_URL": "https://console.example.test",
-                "WECHAT_IMAGE_API_KEY": image_key,
-                "WECHAT_PUBLISH_API_KEY": publish_key,
-            },
-        }
+        generated = client.post("/api/pairing-code", headers=headers)
+        assert generated.status_code == 200
+        assert generated.headers["cache-control"] == "no-store, private"
+        generated_payload = generated.json()
+        code = generated_payload["code"]
+        assert len(code) == 9
+        assert code[4] == "-"
+        assert generated_payload["expires_in"] == 60
+        assert generated_payload["exchange_url"] == (
+            "http://console.example.test/api/v1/pairing/exchange"
+        )
+        assert generated_payload["transport_secure"] is False
+        assert "HTTP" in generated_payload["warning"]
 
-        assert image_key not in client.get("/api/status").text
-        assert publish_key not in client.get("/api/overview").text
+        invalid = client.post(
+            "/api/v1/pairing/exchange", json={"code": "WRONG-CODE"}
+        )
+        assert invalid.status_code == 401
+
+        exchanged = client.post(
+            "/api/v1/pairing/exchange", json={"code": code.lower()}
+        )
+        assert exchanged.status_code == 200
+        assert exchanged.headers["cache-control"] == "no-store, private"
+        assert exchanged.headers["pragma"] == "no-cache"
+        exchanged_payload = exchanged.json()
+        assert exchanged_payload["console_url"] == "http://console.example.test"
+        first_token = exchanged_payload["client_token"]
+        assert len(first_token) >= 32
+        assert exchanged_payload["transport_secure"] is False
+        assert "明文" in exchanged_payload["warning"]
+        first_headers = {"Authorization": f"Bearer {first_token}"}
+        assert client.get("/api/v1/temp-images", headers=first_headers).status_code == 200
+
+        reused = client.post(
+            "/api/v1/pairing/exchange", json={"code": code}
+        )
+        assert reused.status_code == 401
+
+        expiring = client.post("/api/pairing-code", headers=headers).json()
+        with app.state.draft_pairing_lock:
+            for item in app.state.draft_pairing_codes.values():
+                item["expires_at"] = 0
+        expired = client.post(
+            "/api/v1/pairing/exchange", json={"code": expiring["code"]}
+        )
+        assert expired.status_code == 401
+
+        replacement = client.post("/api/pairing-code", headers=headers).json()
+        replacement_token = client.post(
+            "/api/v1/pairing/exchange", json={"code": replacement["code"]}
+        ).json()["client_token"]
+        assert client.get("/api/v1/temp-images", headers=first_headers).status_code == 401
+        assert client.get(
+            "/api/v1/temp-images",
+            headers={"Authorization": f"Bearer {replacement_token}"},
+        ).status_code == 200
 
     get_settings.cache_clear()
