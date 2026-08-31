@@ -1493,14 +1493,65 @@ def test_pairing_code_is_admin_only_single_use_and_allows_http(
         )
         assert expired.status_code == 401
 
-        replacement = client.post("/api/pairing-code", headers=headers).json()
-        replacement_token = client.post(
-            "/api/v1/pairing/exchange", json={"code": replacement["code"]}
+        second_pairing = client.post("/api/pairing-code", headers=headers).json()
+        second_token = client.post(
+            "/api/v1/pairing/exchange", json={"code": second_pairing["code"]}
         ).json()["client_token"]
-        assert client.get("/api/v1/temp-images", headers=first_headers).status_code == 401
+        assert client.get("/api/v1/temp-images", headers=first_headers).status_code == 200
         assert client.get(
             "/api/v1/temp-images",
-            headers={"Authorization": f"Bearer {replacement_token}"},
+            headers={"Authorization": f"Bearer {second_token}"},
         ).status_code == 200
+
+    get_settings.cache_clear()
+
+
+def test_client_draft_create_normalizes_wechat_image_alias(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
+    monkeypatch.setenv("WECHAT_APP_ID", "wx-test")
+    monkeypatch.setenv("WECHAT_APP_SECRET", "secret-test")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
+    monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
+    get_settings.cache_clear()
+    ajax_headers = {"X-Requested-With": "WechatUploader"}
+    fake_wechat = FakeWechatClient()
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login",
+            headers=ajax_headers,
+            json={"username": "admin", "password": "strong-password"},
+        )
+        assert login.status_code == 200
+        code = client.post("/api/pairing-code", headers=ajax_headers).json()["code"]
+        token = client.post(
+            "/api/v1/pairing/exchange", json={"code": code}
+        ).json()["client_token"]
+        app.state.wechat = fake_wechat
+
+        created = client.post(
+            "/api/v1/wechat-drafts",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "request_id": "normalize-mmecoa-001",
+                "title": "兼容性测试",
+                "author": "测试",
+                "digest": "测试摘要",
+                "content": (
+                    '<section><img src="http://mmecoa.qpic.cn/'
+                    'mmecoa_jpg/example/0?from=appmsg"></section>'
+                ),
+                "thumb_media_id": "cover-media-id",
+            },
+        )
+
+        assert created.status_code == 201
+        assert fake_wechat.created_drafts[0]["content"] == (
+            '<section><img src="https://mmbiz.qpic.cn/'
+            'mmecoa_jpg/example/0?from=appmsg"></section>'
+        )
 
     get_settings.cache_clear()

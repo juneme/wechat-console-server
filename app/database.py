@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CURRENT_SCHEMA_VERSION = 4
+MAX_CLIENT_TOKENS_PER_USER = 16
 
 
 def _now() -> str:
@@ -629,10 +630,9 @@ class AssetStore:
             return False
         return True
 
-    def replace_client_token(self, *, token_hash: str, user_id: int) -> None:
+    def create_client_token(self, *, token_hash: str, user_id: int) -> None:
         now = _now()
         with self._connect() as connection:
-            connection.execute("DELETE FROM client_tokens WHERE user_id = ?", (user_id,))
             connection.execute(
                 """
                 INSERT INTO client_tokens (token_hash, user_id, created_at)
@@ -640,6 +640,23 @@ class AssetStore:
                 """,
                 (token_hash, user_id, now),
             )
+            connection.execute(
+                """
+                DELETE FROM client_tokens
+                WHERE user_id = ? AND id NOT IN (
+                    SELECT id FROM client_tokens
+                    WHERE user_id = ?
+                    ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (user_id, user_id, MAX_CLIENT_TOKENS_PER_USER),
+            )
+
+    def replace_client_token(self, *, token_hash: str, user_id: int) -> None:
+        """Replace all tokens for callers that still require legacy semantics."""
+        self.revoke_client_tokens(user_id)
+        self.create_client_token(token_hash=token_hash, user_id=user_id)
 
     def get_client_token(self, token_hash: str) -> dict[str, Any] | None:
         with self._connect() as connection:

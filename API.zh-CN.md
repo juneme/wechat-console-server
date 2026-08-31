@@ -33,7 +33,7 @@ Content-Type: application/json
 }
 ```
 
-服务端只保存令牌摘要。同一用户重新兑换后旧令牌立即失效；修改密码也会撤销令牌。生成和兑换响应均带 `Cache-Control: no-store, private`。
+服务端只保存令牌摘要。每次兑换签发独立令牌，每个用户保留最近使用的 16 枚令牌；修改密码会撤销该用户的全部客户端令牌。生成和兑换响应均带 `Cache-Control: no-store, private`。
 
 ## 2. 公众号选择
 
@@ -67,6 +67,8 @@ curl -X POST 'http://服务器:8791/api/v1/wechat-images' \
 
 临时图片使用 `POST /api/v1/temp-images` 上传，使用 `GET /api/v1/temp-images?limit=500` 列表。两者需要同一客户端令牌，返回的 `/temp/{token}` 图片 URL 可公开读取。
 
+微信可能为正文图返回 `http://mmecoa.qpic.cn` 或 `http://mmbiz.qpic.cn`。服务端统一将两者规范为 `https://mmbiz.qpic.cn`，并保留路径和查询参数。
+
 ## 4. 草稿
 
 ```text
@@ -88,7 +90,7 @@ Content-Type: application/json
 }
 ```
 
-正文图片必须使用 `mode=article` 返回的 URL，封面必须使用 `mode=material` 返回的 `media_id`。相同 `request_id` 和内容不会重复创建；相同标识对应不同内容返回 `409`。
+正文图片必须使用 `mode=article` 返回的 URL，封面必须使用 `mode=material` 返回的 `media_id`。为兼容旧客户端，草稿正文中的 `mmecoa.qpic.cn` 或非 HTTPS `mmbiz.qpic.cn` 图片地址会在校验和提交前自动规范化。相同 `request_id` 和内容不会重复创建；相同标识对应不同内容返回 `409`。
 
 | 方法与路径 | 作用 |
 |---|---|

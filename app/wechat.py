@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from .article import normalize_article_image_url
+
 TOKEN_ERROR_CODES = {40001, 40014, 42001}
 
 
@@ -157,7 +159,7 @@ class WechatClient:
         url = payload.get("url")
         if not url:
             raise WechatAPIError(None, "微信未返回正文图片 URL")
-        return url
+        return normalize_article_image_url(str(url))
 
     async def delete_permanent_material(self, media_id: str) -> None:
         await self._post_json(

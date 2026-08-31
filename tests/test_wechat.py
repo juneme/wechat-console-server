@@ -6,6 +6,36 @@ import httpx
 from app.wechat import WechatClient
 
 
+def test_article_image_upload_normalizes_legacy_cdn_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cgi-bin/stable_token":
+            return httpx.Response(
+                200, json={"access_token": "token", "expires_in": 7200}
+            )
+        if request.url.path == "/cgi-bin/media/uploadimg":
+            assert request.url.params["access_token"] == "token"
+            return httpx.Response(
+                200,
+                json={
+                    "url": (
+                        "http://mmecoa.qpic.cn/mmecoa_jpg/example/0?from=appmsg"
+                    )
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.url}")
+
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = WechatClient("wx-test", "secret-test", http)
+            return await client.upload_article_image(
+                filename="body.jpg", content_type="image/jpeg", data=b"image"
+            )
+
+    assert asyncio.run(run()) == (
+        "https://mmbiz.qpic.cn/mmecoa_jpg/example/0?from=appmsg"
+    )
+
+
 def test_create_draft_refreshes_expired_token() -> None:
     tokens = iter(("token-one", "token-two"))
     draft_tokens: list[str] = []

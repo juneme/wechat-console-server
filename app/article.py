@@ -1,14 +1,63 @@
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 MAX_CONTENT_CHARACTERS = 20_000
 MAX_CONTENT_BYTES = 1_000_000
+CANONICAL_WECHAT_IMAGE_HOST = "mmbiz.qpic.cn"
+WECHAT_IMAGE_HOST_ALIASES = {
+    CANONICAL_WECHAT_IMAGE_HOST,
+    "mmecoa.qpic.cn",
+}
+
+_IMAGE_TAG_PATTERN = re.compile(
+    r"<img\b(?:[^>'\"]|'[^']*'|\"[^\"]*\")*>", re.IGNORECASE
+)
+_SOURCE_ATTRIBUTE_PATTERN = re.compile(
+    r"(?P<prefix>\bsrc\s*=\s*)"
+    r"(?:(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
 
 
 class ArticleValidationError(ValueError):
     pass
+
+
+def normalize_article_image_url(source: str) -> str:
+    """Return the canonical HTTPS WeChat CDN URL for known upload hosts."""
+    parsed = urlsplit(source.strip())
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in WECHAT_IMAGE_HOST_ALIASES:
+        return source.strip()
+    return urlunsplit(
+        (
+            "https",
+            CANONICAL_WECHAT_IMAGE_HOST,
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def normalize_article_content(content: str) -> str:
+    """Canonicalize only image src attributes while preserving the HTML body."""
+
+    def normalize_tag(tag_match: re.Match[str]) -> str:
+        tag = tag_match.group(0)
+
+        def normalize_source(source_match: re.Match[str]) -> str:
+            quote = source_match.group("quote") or ""
+            source = source_match.group("quoted") or source_match.group("bare") or ""
+            normalized = normalize_article_image_url(source)
+            return f"{source_match.group('prefix')}{quote}{normalized}{quote}"
+
+        return _SOURCE_ATTRIBUTE_PATTERN.sub(normalize_source, tag, count=1)
+
+    return _IMAGE_TAG_PATTERN.sub(normalize_tag, content)
 
 
 class _ArticleInspector(HTMLParser):
@@ -44,7 +93,7 @@ def validate_article_content(content: str) -> dict[str, int]:
 
     inspector = _ArticleInspector()
     try:
-        inspector.feed(content)
+        inspector.feed(normalize_article_content(content))
         inspector.close()
     except Exception as exc:
         raise ArticleValidationError("正文 HTML 无法解析") from exc

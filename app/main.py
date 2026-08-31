@@ -35,7 +35,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .article import ArticleValidationError, validate_article_content
+from .article import (
+    ArticleValidationError,
+    normalize_article_content,
+    normalize_article_image_url,
+    validate_article_content,
+)
 from .config import Settings, get_settings
 from .credentials import CredentialCipher, CredentialError
 from .database import AssetStore
@@ -391,15 +396,20 @@ def _require_client_token(
 
 def _ai_upload_result(result: dict) -> dict:
     asset = result.get("asset") or {}
+    article_url = (
+        normalize_article_image_url(str(asset["article_url"]))
+        if asset.get("article_url")
+        else None
+    )
     return {
         "filename": result.get("filename"),
-        "url": asset.get("url"),
+        "url": article_url or asset.get("url"),
         "size": asset.get("processed_bytes") or asset.get("original_bytes"),
         "uploaded_at": asset.get("updated_at") or asset.get("created_at"),
         "status": result.get("status"),
         "media_id": asset.get("media_id"),
         "material_url": asset.get("material_url"),
-        "article_url": asset.get("article_url"),
+        "article_url": article_url,
         "width": asset.get("width"),
         "height": asset.get("height"),
         "sha256": asset.get("sha256"),
@@ -427,8 +437,14 @@ def _public_asset(row: dict) -> dict:
             "updated_at",
         )
     }
+    article_url = (
+        normalize_article_image_url(str(row["article_url"]))
+        if row.get("article_url")
+        else None
+    )
+    result["article_url"] = article_url
     result["kind"] = "wechat"
-    result["url"] = row.get("article_url") or row.get("material_url")
+    result["url"] = article_url or row.get("material_url")
     return result
 
 
@@ -822,6 +838,7 @@ async def _update_remote_draft_article(
         raise HTTPException(status_code=409, detail="当前仅支持修改普通图文草稿")
     article_data = _draft_article_data(remote_article)
     article_data.update(changes)
+    article_data["content"] = normalize_article_content(article_data["content"])
     try:
         validation = validate_article_content(article_data["content"])
     except ArticleValidationError as exc:
@@ -1159,7 +1176,7 @@ async def exchange_pairing_code(
         raise HTTPException(status_code=401, detail="验证码所属用户不存在")
     client_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(client_token.encode("utf-8")).hexdigest()
-    store.replace_client_token(token_hash=token_hash, user_id=user_id)
+    store.create_client_token(token_hash=token_hash, user_id=user_id)
     console_url = settings.public_base_url or str(request.base_url).rstrip("/")
     secure = request.url.scheme == "https"
     response.headers["Cache-Control"] = "no-store, private"
@@ -1833,12 +1850,13 @@ async def api_create_wechat_draft(
     account = _request_account(request, required=True)
     assert account is not None
     account_id = int(account["id"])
+    article_data = _draft_article_data(payload.model_dump(exclude={"request_id"}))
+    article_data["content"] = normalize_article_content(article_data["content"])
     try:
-        validation = validate_article_content(payload.content)
+        validation = validate_article_content(article_data["content"])
     except ArticleValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    article_data = _draft_article_data(payload.model_dump(exclude={"request_id"}))
     content_hash = _draft_content_hash(article_data)
     store: AssetStore = request.app.state.store
     existing = store.get_draft_job_by_request_id(
@@ -1905,7 +1923,7 @@ async def api_create_wechat_draft(
             title=payload.title,
             author=payload.author,
             digest=payload.digest,
-            content=payload.content,
+            content=article_data["content"],
             content_source_url=payload.content_source_url,
             thumb_media_id=payload.thumb_media_id,
             need_open_comment=payload.need_open_comment,

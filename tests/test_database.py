@@ -60,6 +60,33 @@ def test_asset_store_closes_connections_and_deletes_rows(tmp_path: Path) -> None
     assert not database_path.exists()
 
 
+def test_client_pairings_keep_recent_tokens_and_password_revokes_all(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path / "uploader.sqlite3")
+    store.initialize()
+    assert store.initialize_admin_credentials("admin", "old-password-hash")
+    admin = store.get_admin_user()
+    assert admin is not None
+    user_id = int(admin["id"])
+    token_hashes = [f"{index:064x}" for index in range(17)]
+
+    for token_hash in token_hashes:
+        store.create_client_token(token_hash=token_hash, user_id=user_id)
+
+    assert store.get_client_token(token_hashes[0]) is None
+    assert all(
+        store.get_client_token(token_hash) is not None
+        for token_hash in token_hashes[1:]
+    )
+
+    store.change_user_password_hash(user_id, "new-password-hash")
+
+    assert all(
+        store.get_client_token(token_hash) is None for token_hash in token_hashes
+    )
+
+
 def test_v4_replaces_legacy_service_keys_with_hashed_client_tokens(
     tmp_path: Path,
 ) -> None:
