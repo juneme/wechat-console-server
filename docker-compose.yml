@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     ports:
-      - "127.0.0.1:8791:8000"
+      - "127.0.0.1:${YUNOE_HOST_PORT:-8791}:8000"
     volumes:
       - uploader-data:/data
 

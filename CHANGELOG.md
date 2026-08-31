@@ -4,6 +4,7 @@
 
 - Normalize WeChat article-image aliases from `mmecoa.qpic.cn` or `mmbiz.qpic.cn` to canonical HTTPS `mmbiz.qpic.cn` URLs before validation, storage, and draft submission.
 - Keep the 16 most recently used client tokens per user so pairing Codex, Trae, or another client no longer revokes existing clients; password changes still revoke all tokens.
+- Allow deployments to override the default `127.0.0.1:8791` Compose binding with `YUNOE_HOST_PORT`.
 
 ## 4.0.0 - 2026-08-30
 
