@@ -1070,6 +1070,98 @@ def test_ai_api_can_target_a_selected_admin_account(
     get_settings.cache_clear()
 
 
+def test_client_token_follows_active_account_without_repairing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
+    monkeypatch.setenv("TEMP_STORAGE_PATH", str(tmp_path / "temp-images"))
+    monkeypatch.delenv("WECHAT_APP_ID", raising=False)
+    monkeypatch.delenv("WECHAT_APP_SECRET", raising=False)
+    get_settings.cache_clear()
+    web_headers = {"X-Requested-With": "WechatUploader"}
+    fake_wechat = FakeWechatClient()
+
+    def add_account(client: TestClient, suffix: str) -> int:
+        response = client.post(
+            "/api/accounts",
+            headers=web_headers,
+            json={
+                "display_name": f"公众号 {suffix}",
+                "account_type": "subscription",
+                "app_id": f"wx-{suffix}",
+                "app_secret": f"secret-{suffix}",
+            },
+        )
+        assert response.status_code == 201
+        return int(response.json()["account"]["id"])
+
+    def create_draft(
+        client: TestClient,
+        headers: dict[str, str],
+        request_id: str,
+    ) -> int:
+        response = client.post(
+            "/api/v1/wechat-drafts",
+            headers=headers,
+            json={
+                "request_id": request_id,
+                "title": request_id,
+                "content": '<img src="https://mmbiz.qpic.cn/test/image.jpg">',
+                "thumb_media_id": "cover-media-id",
+            },
+        )
+        assert response.status_code == 201
+        row = app.state.store.get_draft_job_by_request_id(request_id)
+        assert row is not None
+        return int(row["account_id"])
+
+    with TestClient(app) as client:
+        app.state.wechat = fake_wechat
+        assert client.post(
+            "/api/auth/login",
+            headers=web_headers,
+            json={"username": "admin", "password": "strong-password"},
+        ).status_code == 200
+        first_account_id = add_account(client, "one")
+        second_account_id = add_account(client, "two")
+        token_headers = _pair_client(client)
+
+        initial_context = client.get("/api/v1/account", headers=token_headers)
+        assert initial_context.status_code == 200
+        assert initial_context.headers["cache-control"] == "no-store, private"
+        assert initial_context.json()["active_account_id"] == second_account_id
+        assert initial_context.json()["account"]["id"] == second_account_id
+
+        switched = client.post(
+            f"/api/accounts/{first_account_id}/activate", headers=web_headers
+        )
+        assert switched.status_code == 200
+        switched_context = client.get("/api/v1/account", headers=token_headers)
+        assert switched_context.status_code == 200
+        assert switched_context.json()["active_account_id"] == first_account_id
+        assert switched_context.json()["account"]["id"] == first_account_id
+        assert create_draft(client, token_headers, "active-account-one") == first_account_id
+
+        assert client.post(
+            f"/api/accounts/{second_account_id}/activate", headers=web_headers
+        ).status_code == 200
+        assert create_draft(client, token_headers, "active-account-two") == second_account_id
+
+        explicit_headers = {
+            **token_headers,
+            "X-Wechat-Account-ID": str(first_account_id),
+        }
+        explicit_context = client.get("/api/v1/account", headers=explicit_headers)
+        assert explicit_context.json()["active_account_id"] == second_account_id
+        assert explicit_context.json()["account"]["id"] == first_account_id
+        assert create_draft(
+            client, explicit_headers, "explicit-account-one"
+        ) == first_account_id
+
+    get_settings.cache_clear()
+
+
 def test_console_saves_encrypted_wechat_account(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("ADMIN_PASSWORD", "strong-password")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "uploader.sqlite3"))
@@ -1472,6 +1564,7 @@ def test_pairing_code_is_admin_only_single_use_and_allows_http(
         assert exchanged.headers["pragma"] == "no-cache"
         exchanged_payload = exchanged.json()
         assert exchanged_payload["console_url"] == "http://console.example.test"
+        assert "active_account_id" not in exchanged_payload
         first_token = exchanged_payload["client_token"]
         assert len(first_token) >= 32
         assert exchanged_payload["transport_secure"] is False

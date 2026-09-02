@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 4.0.2 - 2026-09-02
+
+- Let paired clients read the server's current official-account context without storing a stale account snapshot locally.
+- Keep client tokens valid when the active official account changes so requests without an explicit account override follow the newly selected account.
+
 ## 4.0.1 - 2026-08-31
 
 - Normalize WeChat article-image aliases from `mmecoa.qpic.cn` or `mmbiz.qpic.cn` to canonical HTTPS `mmbiz.qpic.cn` URLs before validation, storage, and draft submission.

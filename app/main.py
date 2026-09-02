@@ -1184,11 +1184,33 @@ async def exchange_pairing_code(
     return {
         "console_url": console_url,
         "client_token": client_token,
-        "active_account_id": user.get("active_account_id"),
         "transport_secure": secure,
         "warning": None
         if secure
         else "当前使用 HTTP，客户端令牌已通过明文连接返回，请勿在不可信网络中使用。",
+    }
+
+
+@app.get(
+    "/api/v1/account",
+    summary="读取客户端令牌当前的公众号上下文",
+)
+async def api_get_account_context(
+    request: Request,
+    response: Response,
+    _: Annotated[str, Depends(_require_client_token)],
+) -> dict:
+    store: AssetStore = request.app.state.store
+    user_id = _request_user_id(request)
+    user = store.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="客户端令牌所属用户不存在")
+    account = _request_account(request)
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    return {
+        "active_account_id": user.get("active_account_id"),
+        "account": _public_account(request, account),
     }
 
 

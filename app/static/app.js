@@ -451,6 +451,7 @@ async function deleteDraftRecord(draft) {
 function renderApiEndpoints() {
   if (!state.status) return;
   const endpoints = [
+    ["GET", "/api/v1/account", "当前公众号", state.status.client_api_ready, "配对令牌"],
     ["POST", "/api/v1/wechat-images", "图片上传", state.status.client_api_ready, "配对令牌"],
     ["POST", "/api/v1/wechat-drafts", "写入草稿", state.status.client_api_ready, "配对令牌"],
     ["GET", "/api/v1/wechat-drafts", "查询草稿", state.status.client_api_ready, "配对令牌"],

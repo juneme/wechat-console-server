@@ -27,11 +27,21 @@ Content-Type: application/json
 {
   "console_url": "http://console.example.test",
   "client_token": "仅此响应返回",
-  "active_account_id": 1,
   "transport_secure": false,
   "warning": "当前使用 HTTP，客户端令牌已通过明文连接返回，请勿在不可信网络中使用。"
 }
 ```
+
+兑换后的令牌绑定控制台用户，不绑定某一个公众号。切换控制台当前公众号后，无需重新配对。
+
+### 读取当前公众号
+
+```http
+GET /api/v1/account
+Authorization: Bearer <client_token>
+```
+
+该接口每次从服务端读取当前账号，不使用客户端配对时的账号快照。
 
 服务端只保存令牌摘要。每次兑换签发独立令牌，每个用户保留最近使用的 16 枚令牌；修改密码会撤销该用户的全部客户端令牌。生成和兑换响应均带 `Cache-Control: no-store, private`。
 
@@ -42,6 +52,8 @@ Content-Type: application/json
 ```http
 X-Wechat-Account-ID: 2
 ```
+
+不传该请求头时，所有图片与草稿操作自动跟随控制台当前选中的公众号。只有需要单次明确覆盖时才传 `X-Wechat-Account-ID`。
 
 ## 3. 图片
 
